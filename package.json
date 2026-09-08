@@ -1,0 +1,20 @@
+{
+  "name": "quds-whatsapp-bot",
+  "version": "1.0.0",
+  "description": "بوت واتساب للرد على العملاء بأسعار منتجات متجر القدس لمهمات المصاعد باستخدام Gemini",
+  "type": "module",
+  "main": "src/server.js",
+  "engines": {
+    "node": ">=18.17"
+  },
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "node --watch src/server.js",
+    "chat": "node scripts/test-cli.js",
+    "sync": "node scripts/sync-catalog.js"
+  },
+  "dependencies": {
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2"
+  }
+}

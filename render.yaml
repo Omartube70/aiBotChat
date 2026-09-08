@@ -1,0 +1,25 @@
+services:
+  - type: web
+    name: quds-whatsapp-bot
+    runtime: node
+    plan: free
+    buildCommand: npm install
+    startCommand: node src/server.js
+    healthCheckPath: /health
+    envVars:
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: GEMINI_MODEL
+        value: gemini-2.0-flash
+      - key: WHATSAPP_PHONE_NUMBER_ID
+        sync: false
+      - key: WHATSAPP_TOKEN
+        sync: false
+      - key: WHATSAPP_VERIFY_TOKEN
+        sync: false
+      - key: STORE_SLUG
+        value: httpsgcokgspyk1uqu
+      - key: INYAD_API_KEY
+        value: yhLyRgMw!5je4pN*jrx6
+      - key: CATALOG_TTL_SECONDS
+        value: "300"
