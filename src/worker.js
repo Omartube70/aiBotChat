@@ -232,10 +232,8 @@ async function handleMessage(msg, env) {
 
   const who = `${msg.name ? msg.name + ' ' : ''}${from}`;
 
-  // نسخة من كل رسالة عميل تتبعت لأرقام المتابعة (fire-and-forget)
-  for (const n of config.agent.ccNumbers) {
-    if (n !== from) sendText(n, `👤 ${who}\n${text}`).catch(() => {});
-  }
+  // نسخة من رسالة العميل لأرقام المتابعة (fire-and-forget)
+  ccStaff(`👤 ${who}\n${text}`, from);
 
   // العميل متحوّل لموظف → ننقل رسالته له والبوت ساكت
   const mode = await getMode(from, env);
@@ -317,6 +315,9 @@ async function handleMessage(msg, env) {
   }
   if (!deliveredAsVoice) await sendText(from, reply);
 
+  // نسخة من رد البوت لأرقام المتابعة
+  ccStaff(`🤖 رد على ${from}:\n${reply}`, from);
+
   const pics = await sendProductImages(from, reply, products, wantsImage(text));
 
   if (wantsLocation(text)) {
@@ -355,6 +356,26 @@ function agentNumbers() {
       [config.agent.manager, config.agent.accounts, ...config.agent.ccNumbers].filter(Boolean),
     ),
   ];
+}
+
+/** يبعت نص لكل أرقام المتابعة (fire-and-forget، من غير ما يوقف المعالجة). */
+function ccStaff(body, exceptFrom) {
+  for (const n of config.agent.ccNumbers) {
+    if (n && n !== exceptFrom) sendText(n, body).catch(() => {});
+  }
+}
+
+/** يبعت ملف مرفوع (media id) لكل أرقام المتابعة. */
+async function ccStaffDoc(mediaId, filename, caption, exceptFrom) {
+  for (const n of config.agent.ccNumbers) {
+    if (n && n !== exceptFrom) {
+      try {
+        await sendDocument(n, mediaId, filename, caption);
+      } catch {
+        /* تجاهل */
+      }
+    }
+  }
 }
 
 function wantsHuman(text) {
@@ -466,18 +487,17 @@ async function handleInvoice(from, text, env) {
     `\n\nالإجمالي: ${grand} ${cur}` +
     (missing.length ? `\n\n(مش لاقي: ${missing.join('، ')})` : '');
   await sendText(from, `فاتورة مبدئية من ${config.store.name}:\n\n${summary}`);
+  ccStaff(`👤 ${from} طلب فاتورة:\n${summary}`, from);
 
   try {
     const xlsx = buildInvoiceXlsx({ lines, grand });
     const mime = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
+    const fname = `فاتورة ${config.store.name}.xlsx`;
+    const cap = `فاتورة مبدئية — الإجمالي ${grand} ${cur}`;
     const mediaId = await uploadMedia(xlsx, mime, 'فاتورة.xlsx');
     if (mediaId) {
-      await sendDocument(
-        from,
-        mediaId,
-        `فاتورة ${config.store.name}.xlsx`,
-        `فاتورة مبدئية — الإجمالي ${grand} ${cur}`,
-      );
+      await sendDocument(from, mediaId, fname, cap);
+      await ccStaffDoc(mediaId, fname, `فاتورة ${from} — ${grand} ${cur}`, from);
     }
   } catch (err) {
     console.error('[invoice] xlsx خطأ:', err.message);
