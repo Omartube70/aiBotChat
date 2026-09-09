@@ -1,8 +1,10 @@
 node_modules/
+node_moduels/
 .env
 *.log
 catalog-dump.json
 .DS_Store
-node_modules
-.env
-catalog-dump.json
+
+# Cloudflare Wrangler
+.wrangler/
+.dev.vars

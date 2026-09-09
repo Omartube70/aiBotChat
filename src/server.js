@@ -1,3 +1,4 @@
+import './load-env.js';
 import express from 'express';
 import { config } from './config.js';
 import { generateReply } from './gemini.js';
@@ -70,19 +71,19 @@ async function handleMessage(msg) {
 
   const lower = text.toLowerCase();
   if (['/reset', 'ابدأ من جديد', 'restart'].includes(lower)) {
-    resetHistory(from);
+    await resetHistory(from);
     await sendText(from, 'اتمسحت المحادثة. اسأل عن أي منتج 👍');
     return;
   }
 
   console.log(`[msg] ${from}: ${text}`);
 
-  const history = getHistory(from);
+  const history = await getHistory(from);
   let reply;
   try {
     const out = await generateReply(text, history);
     reply = out.reply;
-    saveHistory(from, out.history);
+    await saveHistory(from, out.history);
   } catch (err) {
     console.error('[gemini] خطأ:', err.message);
     reply = `معلش حصل خطأ مؤقت. جرّب تاني بعد شوية أو كلمنا على واتساب: ${config.store.whatsapp}`;
@@ -99,8 +100,8 @@ if (process.env.ENABLE_DEBUG_CHAT === '1') {
     const text = req.body?.text || '';
     const user = req.body?.user || 'debug';
     try {
-      const out = await generateReply(text, getHistory(user));
-      saveHistory(user, out.history);
+      const out = await generateReply(text, await getHistory(user));
+      await saveHistory(user, out.history);
       res.json({ reply: out.reply });
     } catch (err) {
       res.status(500).json({ error: err.message });

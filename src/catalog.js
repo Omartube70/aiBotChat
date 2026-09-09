@@ -45,6 +45,8 @@ function normalizeProduct(raw) {
     (new Set(variations.map((v) => v.name)).size > 1 ||
       new Set(prices).size > 1);
 
+  const imgPath = (raw.image_path || '').trim();
+
   return {
     id: raw.id,
     uuid: raw.uuid,
@@ -56,6 +58,7 @@ function normalizeProduct(raw) {
     currency: config.store.currency,
     inStock: variations.length ? variations.some((v) => v.inStock) : true,
     variations: hasRealVariants ? variations : [],
+    imageUrl: imgPath ? `${config.store.imageBase}/${imgPath}` : null,
   };
 }
 
@@ -311,6 +314,10 @@ function compactForModel(p) {
           (v) => `${v.name}: ${v.price} ${p.currency}${v.inStock ? '' : ' (غير متوفر)'}`,
         )
       : undefined,
+    // مفاتيح داخلية — بتتشال قبل الإرسال لـ Gemini
+    imageUrl: p.imageUrl || undefined,
+    _price: p.price ?? undefined, // أقل سعر رقمي (للفاتورة)
+    _priceMax: p.priceMax ?? undefined,
   };
 }
 

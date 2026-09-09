@@ -2,6 +2,7 @@
  * تنزيل كل منتجات المتجر في ملف catalog-dump.json للمراجعة.
  * التشغيل:  npm run sync
  */
+import '../src/load-env.js';
 import { writeFile } from 'node:fs/promises';
 import { fetchAllProducts } from '../src/catalog.js';
 

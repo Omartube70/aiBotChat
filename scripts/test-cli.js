@@ -3,6 +3,7 @@
  * التشغيل:  npm run chat
  * اكتب رسالتك واضغط Enter. اكتب "خروج" للإنهاء.
  */
+import '../src/load-env.js';
 import readline from 'node:readline';
 import { generateReply } from '../src/gemini.js';
 

@@ -1,0 +1,6 @@
+# انسخ الملف ده لـ .dev.vars عشان تجرب الـ Worker محلياً بـ: npm run cf:dev
+# (.dev.vars متجاهَل في git — نفس فكرة .env)
+GEMINI_API_KEY=
+WHATSAPP_PHONE_NUMBER_ID=
+WHATSAPP_TOKEN=
+INYAD_API_KEY=yhLyRgMw!5je4pN*jrx6
