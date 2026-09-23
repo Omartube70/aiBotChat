@@ -41,6 +41,8 @@ CC_NUMBERS = "201000363323,201003044660,201050699420"
 HANDOFF_TTL_SECONDS = "7200"
 # للتجربة بدون واتساب عبر /debug/chat و /debug/search. شيله (أو خليه "0") بعد ما تخلص.
 ENABLE_DEBUG_CHAT = "1"
+# ربط جهات اتصال جوجل (toppower4444@gmail.com) — الـ Client ID مش سرّي؛ الـ GOOGLE_CLIENT_SECRET بيتحط كـ secret في Cloudflare
+GOOGLE_CLIENT_ID = "691463159487-o1fim7bpg2ocpl1thr2eckl9m7d2rf7e.apps.googleusercontent.com"
 
 # تكامل Facebook Messenger (صفحة توب باور للمصاعد) — يحتاج secret واحد:
 #   npx wrangler secret put FB_PAGE_ACCESS_TOKEN
