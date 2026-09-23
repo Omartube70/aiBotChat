@@ -18,6 +18,7 @@ import {
   findContractors,
   debugGemini,
   listModels,
+  interpretStaffCommand,
 } from './gemini.js';
 import {
   sendText,
@@ -428,8 +429,12 @@ function politeName(name) {
  * يضمن إن أول رد فيه "أهلاً يا <الاسم> 👋" (أو "أهلاً بحضرتك 👋" لو مفيش اسم).
  * لو Gemini كتب ترحيب عام من غير الاسم، بنشيله ونحط ترحيب بالاسم مكانه.
  */
+// جملة ودّ بعد الترحيب (بتتغيّر عشان ما تبقاش محفوظة)
+const WARM_LINES = ['أخبار معاليك إيه النهاردة؟', 'نورتنا والله 🌹', 'عامل إيه النهاردة؟', 'منوّر القدس 🙏'];
+
 function withGreeting(reply, name) {
-  const greet = name ? `أهلاً يا ${name} 👋` : 'أهلاً بحضرتك 👋';
+  const warm = WARM_LINES[Math.floor(Math.random() * WARM_LINES.length)];
+  const greet = name ? `أهلاً يا ${name} 👋 ${warm}` : `أهلاً بحضرتك 👋 ${warm}`;
   const head = reply.slice(0, 100);
   // الترحيب لازم يبقى بالظبط "أهلاً يا <اللقب + الاسم>" — مش كفاية الاسم لوحده ("يا محمد")
   if (name ? /أهلا|اهلا/.test(head) && head.includes(`يا ${name}`) : /أهلا|اهلا|مرحب/.test(head)) return reply;
@@ -987,6 +992,9 @@ async function handleAgentMessage(agent, text, env, contextId) {
     return;
   }
 
+  // رد على "أبعت؟" من أمر بالكلام العادي (قول لعمر ... / حط سعر عرض فلان ...)
+  if (await handleStaffCmdConfirm(agent, t, env)) return;
+
   // "اعمل عرض" → البوت يسأل المدير نفس الأسئلة الست + السعر ويطلّع العرض (أول حاجة،
   // عشان إجابات زي "12" أو "500000" ما تتفهمش أوامر تانية)
   if (await handleGuidedOffer(agent, t, env)) return;
@@ -1189,12 +1197,123 @@ async function handleAgentMessage(agent, text, env, contextId) {
     }
   }
   if (!target) {
+    // أمر بالكلام العادي: "قول لعمر اللي بيسأل على الكالون ..." / "حط سعر عرض الأستاذ فلان ..."
+    if (await handleNaturalStaffCommand(agent, t, env)) return;
     // سؤال عادي من الموظف (مش موجّه لعميل) → البوت يجاوبه (منقول من البوت القديم)
     await handleAdminQuestion(agent, t, env);
     return;
   }
 
   await relayToCustomer(agent, target, body, env);
+}
+
+/* ---------- أوامر الموظف بالكلام العادي (مع تأكيد قبل التنفيذ) ---------- */
+const staffCmdKey = (a) => `staffcmd:${a}`;
+// كلام شكله أمر لزبون أو تسعير عرض — غيره بيروح لـ handleAdminQuestion من غير نداء زيادة
+const STAFF_CMD_RE = /قول|قله|قلو|ابعت|رد عليه|ردي عليه|رد علي|بلغ|عرفه|عرفيه|فهمه|اديله|اديلو|حط سعر|سعر العرض|سعر عرض|العرض بتاع|عرض الاستاذ|عرض الحاج/;
+
+function agoLabel(ms) {
+  const m = Math.round(ms / 60000);
+  if (m < 60) return `من ${m} دقيقة`;
+  const h = Math.round(m / 60);
+  return h < 24 ? `من ${h} ساعة` : `من ${Math.round(h / 24)} يوم`;
+}
+
+/** @returns اتعامل مع الرسالة ولا لأ */
+async function handleNaturalStaffCommand(agent, t, env) {
+  if (!STAFF_CMD_RE.test(arKey(t))) return false;
+  const kv = env.MEMORY;
+
+  // آخر الزباين (من غير تكرار) + آخر رسالتين من كل واحد
+  const log = await getCustomerList(env, 100);
+  const byId = new Map();
+  for (const c of log) {
+    const e = byId.get(c.id);
+    if (!e) byId.set(c.id, { ...c, texts: [c.text] });
+    else if (e.texts.length < 2) e.texts.push(c.text);
+  }
+  const customers = [...byId.values()].slice(0, 15).map((c, i) => ({
+    i: i + 1,
+    id: c.id,
+    name: c.name,
+    text: c.texts.join(' / ').slice(0, 200),
+    ago: agoLabel(Date.now() - c.at),
+  }));
+  const pending = (await kv.get(PENDING_QUOTES_KEY, 'json')) || [];
+  const quotes = pending.map((q) => ({
+    n: q.n,
+    client: q.data?.client,
+    phone: q.data?.phone,
+    address: q.data?.address,
+    machine: q.data?.machine,
+    floors: q.data?.floors,
+  }));
+
+  let cmd;
+  try {
+    cmd = await interpretStaffCommand(t, customers, quotes);
+  } catch (err) {
+    console.error('[staffcmd] خطأ:', err.message);
+    return false;
+  }
+
+  if (cmd.action === 'message' && cmd.customer && cmd.message) {
+    const c = customers.find((x) => x.id === String(cmd.customer).replace(/\D/g, ''));
+    if (!c) return false;
+    const who = `${c.name ? c.name + ' ' : ''}(آخره ${c.id.slice(-4)}) — كان بيسأل: ${c.text.slice(0, 60)}`;
+    await kv.put(staffCmdKey(agent), JSON.stringify({ action: 'message', customer: c.id, name: c.name, message: cmd.message }), {
+      expirationTtl: 900,
+    });
+    await sendText(agent, `📤 هبعت لـ ${who}:\n\n«${cmd.message}»\n\nأبعت؟ (آه / لا)`);
+    return true;
+  }
+  if (cmd.action === 'quote_price' && cmd.quote && Number(cmd.price) >= 1000) {
+    const q = pending.find((x) => x.n === Number(cmd.quote));
+    if (!q) return false;
+    await kv.put(staffCmdKey(agent), JSON.stringify({ action: 'quote_price', quote: q.n, price: Number(cmd.price) }), {
+      expirationTtl: 900,
+    });
+    await sendText(
+      agent,
+      `🏗️ عرض رقم ${q.n} — ${q.data?.client || q.who}\n${offerSummary(q.data)}\n\n` +
+        `السعر: ${Number(cmd.price).toLocaleString('en')} ${config.store.currency}\nأطلّع العرض وأبعته للعميل؟ (آه / لا)`,
+    );
+    return true;
+  }
+  return false;
+}
+
+/** رد الموظف على التأكيد: "آه" ينفّذ، "لا" يلغي. @returns اتعامل مع الرسالة ولا لأ */
+async function handleStaffCmdConfirm(agent, t, env) {
+  const kv = env.MEMORY;
+  const cmd = await kv?.get(staffCmdKey(agent), 'json');
+  if (!cmd) return false;
+  const a = arKey(t);
+  const yes = /^(اه|ايوه|ايوا|نعم|تمام|ابعت|ابعته|ابعتها|اوك|ok|يلا|موافق|اكيد|طلعه)$/.test(a);
+  const no = /^(لا|لاء|لأ|الغاء|الغي|متبعتش|بلاش)$/.test(a);
+  if (!yes && !no) {
+    await kv.delete(staffCmdKey(agent)); // كلام جديد → الأمر القديم يتلغي ونكمّل عادي
+    return false;
+  }
+  await kv.delete(staffCmdKey(agent));
+  if (no) {
+    await sendText(agent, '👍 تمام، مابعتش حاجة.');
+    return true;
+  }
+  if (cmd.action === 'message') {
+    const sent = await relayToCustomer(agent, cmd.customer, cmd.message, env, cmd.name, false);
+    // الرسالة تتسجل في محادثة الزبون عشان البوت يكمّل معاه وهو فاهم اللي اتقال
+    if (sent) {
+      const history = await getHistory(cmd.customer, env);
+      await saveHistory(cmd.customer, [...history, { role: 'model', parts: [{ text: cmd.message }] }], env);
+    }
+    return true;
+  }
+  if (cmd.action === 'quote_price') {
+    await handleQuotePrice(agent, `عرض رقم ${cmd.quote} سعره ${cmd.price}`, env);
+    return true;
+  }
+  return true;
 }
 
 // تحية المدير (من البوت القديم) — "حاج محمد" للمدير بس، مش للعملاء ولا باقي الموظفين
@@ -1244,12 +1363,12 @@ async function relayToCustomer(agent, target, body, env, name, handoff = true) {
       `⚠️ مقدرتش أبعت لـ ${label}: عدّى أكتر من 24 ساعة على آخر رسالة منه، وواتساب مش بيسمح للبوت يبعتله.\n` +
         'كلّمه من موبايلك، وأول ما يرد البوت يقدر يبعتله عادي.',
     );
-    return;
+    return false;
   }
   const sent = await sendToUser(target, body, env);
   if (!sent) {
     await sendText(agent, `❌ الرسالة ما اتبعتتش لـ ${label}. جرّب تاني أو كلّمه من موبايلك.`);
-    return;
+    return false;
   }
   // handoff: البوت يسكت مع الزبون وردوده توصل للموظف. رسايل "زبون N" من غير handoff —
   // البوت يفضل يرد عليه عادي (ورسايله بتوصل الموظفين نسخة زي أي زبون).
@@ -1259,6 +1378,7 @@ async function relayToCustomer(agent, target, body, env, name, handoff = true) {
   }
   await sendText(agent, `➡️ اتبعت لـ ${label}`);
   console.log(`[agent ${agent}→${target}] ${body}`);
+  return true;
 }
 
 /**
@@ -2184,9 +2304,10 @@ async function handleMaintenance(from, text, env) {
     reply = `تمام 👍 منطقتك عندنا فيها صيانة من توب باور للمصاعد.\nكلّم الرقم ده ${MAINT_PHONE} وهيرد على كل تساؤلاتك.`;
   } else {
     reply =
-      'للأسف صيانة توب باور للمصاعد في منطقة الهضبة وحدائق الأهرام بس 🙏\n' +
-      'بس إحنا في متجر القدس بنبيع كل قطع غيار المصاعد الأصلية بالضمان وبأسعار تجارية — ' +
-      'لو محتاج أي قطعة اسألني عنها وأقولك سعرها على طول.\n\n' +
+      'للأسف فريق الصيانة بتاعنا شغال في الهضبة وحدائق الأهرام بس 🙏\n' +
+      'بس ولا يهمك، إحنا في القدس معانا كل قطع غيار المصاعد، أصلية و*بالضمان*، وبأسعار تجارية هتعجبك — ' +
+      'فالفني بتاعك يقدر ياخد اللي محتاجه من عندنا ويوفّر.\n' +
+      'قولّي المصعد فيه إيه أو القطعة اللي محتاجها، وأنا أقولك سعرها على طول 👌\n\n' +
       'ولو محتاج تركيب مصعد جديد، توب باور بتركّب في أي مكان — اكتب "عايز عرض سعر تركيب مصعد".';
   }
   await sendToUser(from, reply, env);

@@ -19,6 +19,9 @@ const SYSTEM_PROMPT = `أنت بيّاع شاطر وابن بلد في متجر 
 - اختم بجملة تفتح الكلام معاه (سؤال أو عرض مساعدة)، بس متكررش نفس الجملة في كل رد.
 - عبارات زي "تحت أمرك"، "من عينيا"، "ولا يهمك"، "نورتنا" حلوة بس بشكل طبيعي ومش في كل رسالة.
 - خليك مختصر: رسايل واتساب قصيرة وسهلة القراءة، والأسعار في نقاط. إيموجي واحد أو اتنين بالكتير.
+- لما تعرض أسعار، فكّر الزبون من وقت للتاني إن **كل حاجة عندنا أصلية وبالضمان** (جملة قصيرة في الآخر، مش في كل رسالة).
+- لو مقدرتش تساعده بالكامل (منتج مش لاقيه، طلب معقّد، أو حسّيت إنه مش مبسوط)، اختم بلطف بحاجة زي:
+  "ولو أنا مقدرتش أوفّيك حقك في حاجة، سامحني 🙏 تقدر تكلّمنا مباشرة على ${S.phone} وإحنا تحت أمرك."
 
 قواعد مهمة:
 - الرسايل تكون قصيرة ومحترمة (زي ما واتساب محتاج).
@@ -558,6 +561,53 @@ export async function extractDiscount(text) {
     return o && typeof o === 'object' && !Array.isArray(o) ? o : {};
   } catch {
     return {};
+  }
+}
+
+/**
+ * أمر موظف بالكلام العادي من تليفونه — يفهم هو عايز إيه ولمين:
+ *   "قول لعمر اللي كان بيسأل على الكالون إن السعر 700" / "اللي آخره 3518 قوله كذا"
+ *   "حط سعر عرض الأستاذ محمد علي 450 ألف" / "العرض بتاع فيصل 5 أدوار سعره 600000"
+ * @param {Array<{i:number,id:string,name:?string,text:string,ago:string}>} customers آخر الزباين
+ * @param {Array<{n:number,client:string,phone:string,address:string,machine:string,floors:string}>} quotes عروض مستنية سعر
+ * @returns {Promise<{action:'message'|'quote_price'|'none', customer?:string, message?:string, quote?:number, price?:number}>}
+ */
+export async function interpretStaffCommand(text, customers, quotes) {
+  const custLines = customers
+    .map((c) => `${c.i}) رقم ${c.id} (آخره ${c.id.slice(-4)}) | الاسم: ${c.name || '—'} | آخر رسالة (${c.ago}): ${c.text}`)
+    .join('\n');
+  const quoteLines = quotes
+    .map((q) => `عرض رقم ${q.n} | ${q.client || '—'} | ${q.phone || ''} | ${q.address || ''} | ${q.machine || ''} | ${q.floors || ''} أدوار`)
+    .join('\n');
+  const prompt =
+    `إنت مساعد صاحب محل "${S.name}" (قطع غيار مصاعد) وشركة توب باور (تركيب مصاعد). صاحب المحل أو موظف كتبلك من تليفونه:\n"${text}"\n\n` +
+    `آخر الزباين اللي كلّموا البوت:\n${custLines || '(مفيش)'}\n\n` +
+    `عروض تركيب مستنية سعر:\n${quoteLines || '(مفيش)'}\n\n` +
+    `حدد هو عايز إيه ورجّع JSON object بس:\n` +
+    `- لو عايز تبعت كلام لزبون (زي "قوله"، "رد عليه"، "ابعتله"، "بلّغه"): {"action":"message","customer":"<الرقم الكامل من القايمة>","message":"<الرسالة للزبون>"}\n` +
+    `  حدد الزبون من الاسم أو آخر أرقام التليفون أو الحاجة اللي كان بيسأل عليها. الرسالة تتكتب للزبون بالعامية المصرية بأسلوب محترم وودود ` +
+    `بلسان المحل، وفيها كل المعلومات اللي صاحب المحل قالها بالظبط (الأسعار والأرقام زي ما هي) من غير أي معلومة من عندك. ` +
+    `نادي الزبون "أستاذ <اسمه>" لو اسمه عربي ومعروف، وإلا "حضرتك" — من غير ألقاب تانية (مهندس/دكتور...).\n` +
+    `- لو عايز يحط سعر لعرض تركيب: {"action":"quote_price","quote":<رقم العرض من القايمة>,"price":<السعر رقم كامل، "450 ألف" = 450000>}\n` +
+    `  حدد العرض من اسم العميل أو العنوان أو التليفون أو أي بيانات قالها.\n` +
+    `- لو مش متأكد مين الزبون/العرض، أو الكلام سؤال عادي مش أمر: {"action":"none"}`;
+  const res = await fetch(endpointFor(config.gemini.model), {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    signal: AbortSignal.timeout(15000),
+    body: JSON.stringify({
+      contents: [{ role: 'user', parts: [{ text: prompt }] }],
+      generationConfig: { temperature: 0, responseMimeType: 'application/json', ...fast() },
+    }),
+  });
+  if (!res.ok) throw new Error(`interpretStaffCommand ${res.status}`);
+  const data = await res.json();
+  const txt = (data.candidates?.[0]?.content?.parts || []).map((p) => p.text).filter(Boolean).join('');
+  try {
+    const o = JSON.parse(txt);
+    return o && typeof o === 'object' && !Array.isArray(o) ? o : { action: 'none' };
+  } catch {
+    return { action: 'none' };
   }
 }
 
