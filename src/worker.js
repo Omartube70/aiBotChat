@@ -1321,10 +1321,10 @@ async function findCustomers(target, env) {
 }
 
 /** رسالة ودّ تشجّع زبون بقاله كتير يرجع يشتري (من غير أسعار — عشان محدش يتضايق من رقم غلط). */
-function reengageMessage(name, sender = null, fromStaffPhone = false) {
+function reengageMessage(name, fromStaffPhone = false) {
   const pick = (a) => a[Math.floor(Math.random() * a.length)];
   // الرسالة ممكن تطلع من تليفون موظف (رقم غريب على الزبون) — فأول سطر بيعرّفه إحنا مين
-  const intro = `معاك ${sender ? `${sender} من ` : ''}*${config.store.name}* — الهرم 🌹`;
+  const intro = `معاك *${pick(['', 'إدارة ', 'معرض '])}${config.store.name}* — الهرم 🌹`;
   const first = name && /\p{L}{2,}/u.test(name) ? name.split(' ')[0] : null;
   const titled = name && /^(حاج|الحاج|م\/|مهندس|باشمهندس|أستاذ|استاذ|د\/|دكتور)/.test(name);
   // الاسم باللقب (بيتغيّر: أستاذ / باشمهندس) — ولو مفيش اسم "يا فندم"
@@ -1364,11 +1364,6 @@ function reengageMessage(name, sender = null, fromStaffPhone = false) {
   return [pick(hello), intro, pick(miss), pick(stock), pick(offer)].join('\n');
 }
 
-/** اسم اللي باعت الرسالة (عشان الزبون يعرف مين بيكلّمه) — الأرقام التلاتة بيبعتوا باسم الحاج محمد. */
-function senderName(agent) {
-  return agentNumbers().includes(agent) ? 'الحاج محمد' : null;
-}
-
 /** ينفّذ إرسال لزبون واحد اتحدد (رسالة معيّنة أو رسالة ودّ). */
 async function sendStaffMessage(agent, kind, c, message, env) {
   // زبون ماكلّمناش آخر 24 ساعة: واتساب مش هيسمح للبوت يبعتله ببلاش —
@@ -1377,7 +1372,7 @@ async function sendStaffMessage(agent, kind, c, message, env) {
   const lastAt = recent?.at || (await getCustomerDir(env))[c.id]?.last || 0;
   const viaStaff = !lastAt || Date.now() - lastAt > 24 * 3600 * 1000;
   const text =
-    kind === 'reengage' || !message ? reengageMessage(c.name, senderName(agent), viaStaff) : message;
+    kind === 'reengage' || !message ? reengageMessage(c.name, viaStaff) : message;
   if (viaStaff) {
     // الرسالة طالعة من تليفون الموظف (مفيهوش بوت) — فبنخلّي أسهل رد للزبون يروح لرقم المحل.
     // من غير لينك باين (الناس بتقلق من اللينكات): واتساب بيخلّي رقم التليفون نفسه يتداس عليه
