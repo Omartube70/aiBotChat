@@ -1495,6 +1495,13 @@ async function handleStaffRequest(agent, t, env) {
   } catch (err) {
     console.error('[staff] فهم الأمر خطأ:', err.message);
   }
+  // "رسالة مخصوصة" بتتبعت بس لو الموظف قال صراحة إيه اللي يتقال ("قوله/بلّغه/عرّفه ...").
+  // غير كده ("ابعتله رسالة"، "بقاله كتير") = رسالة الودّ الجاهزة — عشان البوت ما يألّفش كلام من عنده
+  // (حصل: الفويس اتسمع "بقى دكتور" بدل "بقاله كتير" والبوت بعت تهنئة بالدكتوراة!)
+  if (cmd.action === 'message' && !/قول|قوله|قله|قلو|بلغ|عرف|فهم|رد عليه|ردي عليه|اكتبله|اكتب له/.test(a)) {
+    cmd.action = 'reengage';
+    delete cmd.message;
+  }
   console.log(`[staff ${agent}] → ${JSON.stringify(cmd).slice(0, 200)}`);
 
   switch (cmd.action) {
