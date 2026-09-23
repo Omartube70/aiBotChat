@@ -751,6 +751,11 @@ async function handleMessage(msg, env) {
 
   // أول رسالة في المحادثة → ترحيب بالاسم مضمون (Gemini ساعات بينساه)
   if (!history.length) reply = withGreeting(reply, politeName(displayName));
+  // لسه قافلين أسئلة عرض تركيب بدأت غلط → اعتذار قبل الرد
+  if (await env.MEMORY?.get(sorryKey(from))) {
+    await env.MEMORY.delete(sorryKey(from));
+    reply = `${SORRY_LINES[Math.floor(Math.random() * SORRY_LINES.length)]}\n${reply}`;
+  }
 
   // نحدد نوع الرد: تفضيل محفوظ > (تلقائي) يقلّد رسالة العميل
   let pref;
@@ -2566,6 +2571,25 @@ function wantsElevatorQuote(text) {
  * العميل عايز عرض تركيب: البوت يسأله على البيانات (ممكن على كذا رسالة)، ولما تكمل —
  * أو بعد سؤالين لو في حاجة مش عارفها — يبعتها للإدارة. @returns اتعامل مع الرسالة ولا لأ.
  */
+const sorryKey = (id) => `sorry:${id}`;
+const SORRY_LINES = [
+  'معلش يا هندسة، أنا اللي فهمتك غلط 🙏 عيوني، تحت أمرك.',
+  'حقك عليا يا برنس، أنا اللي لخبطت 🙏 تحت أمرك.',
+  'أنا آسف يا باشا، فهمتك غلط 🙏 من عينيا.',
+];
+
+/** العميل (وهو في نص أسئلة عرض التركيب) بيسأل فعلاً على قطع غيار؟ */
+async function isPartsInquiry(text) {
+  const a = arKey(text);
+  if (
+    /قطع غيار|قطعه غيار|بضاع|مش عايز عرض|مش عاوز عرض|مش محتاج عرض|مش تركيب|مش عايز تركيب|مش عاوز تركيب|فهمت غلط|فهمتني غلط|فاهمني غلط|فهمتنى غلط|مش ده اللي انا عايزه|بسال علي|بسال عن|انا بسال/.test(a)
+  )
+    return true;
+  if (!/سعر|بكام|كام|عندكم|عندك|موجود|متاح/.test(a)) return false;
+  const found = await searchProducts(text, 3);
+  return found.some((p) => !p['تقريبي']);
+}
+
 async function handleCustomerQuote(from, text, name, who, env, force = false) {
   const kv = env?.MEMORY;
   if (!kv || String(from).startsWith('fb:')) return false;
@@ -2581,6 +2605,15 @@ async function handleCustomerQuote(from, text, name, who, env, force = false) {
     if (!asking) return false;
     // طلب عرض تاني من نفس العميل (والأول لسه مستني سعر) → طلب جديد بالست بنود من الأول
     st = { data: {} };
+  }
+
+  // البوت فهم غلط إن العميل عايز تركيب، وهو بيسأل على قطع غيار → نقفل الأسئلة ونعتذر ونكمّل معاه بيع
+  if (st.step != null && !asking && (await isPartsInquiry(text))) {
+    await kv.delete(cquoteKey(from));
+    await kv.delete(installKey(from));
+    await kv.put(sorryKey(from), '1', { expirationTtl: 600 });
+    console.log(`[cquote] ${from}: طلع بيسأل على قطع غيار — قفلنا أسئلة العرض`);
+    return false;
   }
 
   // سؤال سؤال: البوت بيسأل خانة واحدة، والعميل يرد بالإجابة بس
