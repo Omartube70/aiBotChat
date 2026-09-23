@@ -1368,7 +1368,7 @@ async function sendStaffMessage(agent, kind, c, message, env) {
     // لينك بيفتح محادثة البوت والرسالة مكتوبة جاهزة، يدوس إرسال والبوت يكمّل معاه
     const shop = config.store.whatsapp.replace(/\D/g, '');
     const hello = encodeURIComponent('السلام عليكم، عايز أسأل على سعر');
-    const full = `${text}\n\n👈 عشان تعرف أي سعر على طول، دوس هنا وابعت:\nhttps://wa.me/${shop}?text=${hello}`;
+    const full = `${text}\n\n👇 لو عندك أي استفسار، دوس على اللينك ده وهنجاوبك على كل اللي إنت عايزه:\nhttps://wa.me/${shop}?text=${hello}`;
     await sendText(
       agent,
       `📲 ${c.name || 'الزبون'} (آخره ${c.id.slice(-4)}) ماكلّمناش ${lastAt ? agoLabel(Date.now() - lastAt) : 'قبل كده'} — ` +
