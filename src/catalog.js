@@ -449,6 +449,22 @@ function priceLabel(price, priceMax, currency) {
 
 // حالة التوفر مش بتتبعت لـ Gemini خالص ولا بتتذكر للعميل — السعر والتفاصيل بس
 // (طلب صاحب المتجر: البوت ميقولش "غير متوفر" حتى لو المخزون صفر)
+// [اللي الزبون بيسأل عليه، اللي نقترحه معاه] — على الأسماء المطبّعة (normalizeAr)
+const COMPLEMENTS = [
+  [/كالون/, /كامه|شفره/],
+  [/كامه/, /كالون|شفره/],
+  [/طرمب|طلمب/, /كاوتش|قاعده/],
+  [/كارت|كنترول|انفرتر/, /ريموت|شفره|اسهم/],
+  [/باب/, /كالون|شفره|كامه/],
+  [/زرار/, /اسهم|مبين/],
+  [/اسهم|مبين/, /زرار/],
+  [/ماكين/, /زيت|طاره/],
+  [/كابين|كبين/, /مروحه|لمبه/],
+  [/واير|سلك|كبل/, /سلك|كبل|حامل/],
+];
+// إكسسوارات شكلها حلو في الصور — بتتعرض لما مفيش حاجة مكمّلة
+const ATTRACTIVE = /(?:^| )(?:ريموت|شفره|اسهم|مبين|زرار|لمبه|مروحه|فلاش|شاشه|جرس|مرايه|ستانلس|ديكور)/;
+
 /**
  * منتج "يفتح النفس" نقترحه على الزبون من وقت للتاني (إكسسوارات حلوة بسعر معقول وليها صورة)
  * — زي "إيه رأيك في الأسهم دي؟ سعرها كذا". بيرجع بنفس شكل نتايج البحث + علامة اقتراح.
@@ -457,14 +473,13 @@ function priceLabel(price, priceMax, currency) {
 export async function suggestProduct(excludeNames = []) {
   const all = await ensureCache();
   const skip = new Set(excludeNames.map(normalizeAr));
-  const picks = all.filter(
-    (p) =>
-      p.imageUrl &&
-      p.price >= 40 &&
-      p.price <= 1500 &&
-      !skip.has(p._n) &&
-      /زرار|اسهم|أسهم|مبين|لمبه|لمبة|فلاش|شاشه|شاشة|جرس|مرايه|مراية|كابينه|كبينه|انتركم|ديكور|ستانلس/.test(p.name),
-  );
+  const ok = (p) => p.imageUrl && p.price >= 15 && p.price <= 3000 && !skip.has(p._n);
+  // منتج "يتعرض مع ده": بنختار حاجة بتكمّل اللي الزبون بيسأل عليه
+  const asked = [...skip].join(' ');
+  const pair = COMPLEMENTS.find(([re]) => re.test(asked));
+  let picks = pair ? all.filter((p) => ok(p) && pair[1].test(p._n)) : [];
+  // مفيش حاجة مكمّلة → إكسسوارات شكلها حلو ويشغّل بيها الزبون
+  if (!picks.length) picks = all.filter((p) => ok(p) && ATTRACTIVE.test(p._n));
   if (!picks.length) return null;
   const p = picks[Math.floor(Math.random() * picks.length)];
   const overrides = await getOverrides();
