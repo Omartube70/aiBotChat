@@ -430,10 +430,15 @@ function politeName(name) {
  */
 function withGreeting(reply, name) {
   const greet = name ? `أهلاً يا ${name} 👋` : 'أهلاً بحضرتك 👋';
-  const head = reply.slice(0, 80);
-  if (name ? head.includes(name.split(' ').pop()) : /أهلا|اهلا|مرحب|وعليكم/.test(head)) return reply;
-  const rest = reply.replace(/^\s*(?:أهلاً|أهلا|اهلا|اهلاً|مرحبا|مرحباً)[^\n،,.!؟]*[،,.!]?\s*/, '');
-  return `${greet}\n${rest}`;
+  const head = reply.slice(0, 100);
+  // الترحيب لازم يبقى بالظبط "أهلاً يا <اللقب + الاسم>" — مش كفاية الاسم لوحده ("يا محمد")
+  if (name ? /أهلا|اهلا/.test(head) && head.includes(`يا ${name}`) : /أهلا|اهلا|مرحب/.test(head)) return reply;
+  // بنشيل جملة الترحيب اللي Gemini كتبها (لحد أول فاصلة/سطر) ونحط الترحيب الصح مكانها
+  const salam = /^\s*(?:و\s*)?عليكم السلام/.test(reply);
+  const rest = reply
+    .replace(/^\s*(?:(?:و\s*)?عليكم السلام|أهلاً|أهلا|اهلا|اهلاً|مرحبا|مرحباً|يا هلا)[^\n،,.!؟]*[،,.!؟]?\s*/, '')
+    .trim();
+  return `${salam ? 'وعليكم السلام، ' : ''}${greet}\n${rest}`;
 }
 
 /** الرد فيه أرقام (أسعار/أكواد منتجات) تستاهل تتبعت مكتوبة بعد الصوت؟ */
