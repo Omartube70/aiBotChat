@@ -54,7 +54,7 @@ export const config = {
     voiceId: '21m00Tcm4TlvDq8ikWAM', // TTS_VOICE_ID — صوت ElevenLabs، أو اسم صوت Azure
     azureRegion: 'eastus', // TTS_AZURE_REGION (لو provider=azure)
     maxChars: 700, // ردود أطول من كده بتتبعت نص
-    enabled: false, // VOICE_REPLIES=1 يشغّل الرد بالصوت (محتاج Workers Paid — المجاني بيوقف الرسالة)
+    enabled: false, // VOICE_REPLIES=1 يشغّل الرد بالصوت (بعد الكتابة — تقيل على Cloudflare المجاني)
   },
 
   sendImages: true, // إرسال صور المنتجات مع الرد

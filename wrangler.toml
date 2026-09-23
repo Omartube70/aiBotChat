@@ -22,8 +22,8 @@ TTS_GEMINI_MODEL = "gemini-3.8-flash-tts"
 TTS_GEMINI_VOICE = "Charon"
 TTS_VOICE_ID = "21m00Tcm4TlvDq8ikWAM"
 TTS_MAX_CHARS = "700"
-# الرد بالصوت: "1" بعد الترقية لـ Workers Paid (المجاني 10ms معالجة بس وبيقفل الرسالة كلها)
-VOICE_REPLIES = "0"
+# الرد بالصوت على الفويس (الكتابة بتتبعت الأول دايمًا، والصوت آخر حاجة — لو Cloudflare المجاني قطعه العميل مايتأثرش)
+VOICE_REPLIES = "1"
 WHATSAPP_VERIFY_TOKEN = "quds-bot-verify-123"
 WHATSAPP_GRAPH_VERSION = "v21.0"
 STORE_SLUG = "httpsgcokgspyk1uqu"

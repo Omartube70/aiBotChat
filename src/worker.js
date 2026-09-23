@@ -474,11 +474,6 @@ function withGreeting(reply, name) {
   return `${salam ? 'وعليكم السلام، ' : ''}${greet}\n${rest}`;
 }
 
-/** الرد فيه أرقام (أسعار/أكواد منتجات) تستاهل تتبعت مكتوبة بعد الصوت؟ */
-function hasPricesOrCodes(text) {
-  return /[0-9٠-٩]{2,}|ج\.?\s?م|جنيه|[A-Za-z]+[-_]?[0-9]+/.test(String(text));
-}
-
 /**
  * هل العميل طلب يغيّر نوع الرد؟
  * @returns {'voice'|'text'|'auto'|null}
@@ -762,25 +757,12 @@ async function handleMessage(msg, env) {
   if (modeChange === 'auto') pref = null;
   else if (modeChange) pref = modeChange;
   else pref = await getPref(from, env);
-  // الرد الصوتي (MP3 بـ lamejs) محتاج وقت معالجة أكتر من 10ms بتاعة Cloudflare المجاني — بيقتل الرسالة كلها.
-  // VOICE_REPLIES=1 في wrangler.toml لما الحساب يبقى Workers Paid.
   const wantVoice = config.tts.enabled && (pref === 'voice' || (!pref && type === 'audio'));
 
-  let deliveredAsVoice = false;
-  if (wantVoice && reply.length <= config.tts.maxChars) {
-    try {
-      const audio = await synthesize(reply);
-      if (audio) {
-        const fname = audio.mimeType === 'audio/ogg' ? 'reply.ogg' : 'reply.mp3';
-        const mediaId = await uploadMedia(audio.buffer, audio.mimeType, fname);
-        if (mediaId && (await sendAudio(from, mediaId))) deliveredAsVoice = true;
-      }
-    } catch (err) {
-      console.error('[tts] خطأ:', err.message);
-    }
-  }
-  // الصوت وصل بس فيه أسعار/أكواد → نبعت نفس الرد مكتوب كمان عشان العميل يرجعله
-  if (!deliveredAsVoice || hasPricesOrCodes(reply)) await sendText(from, reply);
+  // الترتيب مقصود: الكتابة والصور والنسخ الأول، والصوت آخر حاجة.
+  // عمل الـ MP3 تقيل على Cloudflare المجاني — لو قطع المعالجة في النص يبقى العميل استلم كل حاجة تانية
+  // (قبل كده كان الصوت الأول، فلو اتقطع مكانش بيوصل للعميل ولا حتى الكتابة).
+  await sendText(from, reply);
 
   // نسخة من رد البوت لأرقام المتابعة
   ccStaff(`🤖 رد على ${from}:\n${reply}`, from, env);
@@ -799,6 +781,21 @@ async function handleMessage(msg, env) {
   if (isSupplierHandoff) {
     recordSupplier(from, displayName, text, env).catch(() => {});
     await alertSupplierHandoff(from, who, `${who} (تاجر/مورّد):\n${text}\n\nرد البوت:\n${reply}`, env);
+  }
+
+  // الفويس بيتقري بالعامية من غير الأسعار الطويلة — والأسعار موجودة مكتوبة فوق
+  let deliveredAsVoice = false;
+  if (wantVoice && reply.length <= config.tts.maxChars) {
+    try {
+      const audio = await synthesize(reply);
+      if (audio) {
+        const fname = audio.mimeType === 'audio/ogg' ? 'reply.ogg' : 'reply.mp3';
+        const mediaId = await uploadMedia(audio.buffer, audio.mimeType, fname);
+        if (mediaId && (await sendAudio(from, mediaId))) deliveredAsVoice = true;
+      }
+    } catch (err) {
+      console.error('[tts] خطأ:', err.message);
+    }
   }
 
   console.log(
