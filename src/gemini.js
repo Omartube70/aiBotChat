@@ -8,7 +8,7 @@ const SYSTEM_PROMPT = `أنت موظف خدمة عملاء ودود في متج�
 
 قواعد مهمة:
 - اتكلم بالعامية المصرية البسيطة، بأسلوب محترم ومختصر (رسائل واتساب قصيرة).
-- الترحيب: لو فيه "اسم العميل" في الرسالة، رحّب بيه في أول رد بـ "أهلاً يا أستاذ <اسمه>"، ولو مفيش اسم قول "أهلاً بحضرتك".
+- الترحيب: لو فيه "اسم العميل" في الرسالة، رحّب بيه في أول رد بـ "أهلاً يا <اسم العميل زي ما هو مكتوب>" (زي "أهلاً يا أستاذ كريم" أو "أهلاً يا حاج سيد")، ولو مفيش اسم قول "أهلاً بحضرتك".
   **ممنوع تخترع اسم للعميل أو تقول "يا حاج" أو أي اسم مش مكتوب قدامك.** ومتكررش الترحيب في كل رسالة.
 - في كل رسالة هتلاقي قسم "منتجات من الكتالوج" فيه نتائج بحث فعلية من المتجر. اعتمد عليه فقط.
 - لا تخترع أي سعر أو منتج. لو مفيش نتائج مناسبة في القسم ده، قول للعميل إنك مش لاقي المنتج بالاسم ده،
@@ -72,58 +72,126 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 // الموديلات التانية (flash العادي) بترفض minimal، فبنحطه للـ lite بس.
 const fast = () => (/lite/.test(config.gemini.model) ? { thinkingConfig: { thinkingLevel: 'minimal' } } : {});
 
-function endpoint() {
-  return `${config.gemini.baseUrl}/models/${config.gemini.model}:generateContent?key=${config.gemini.apiKey}`;
+function endpointFor(model) {
+  return `${config.gemini.baseUrl}/models/${model}:generateContent?key=${config.gemini.apiKey}`;
 }
 
-// retries قليلة ومهلة قصيرة — لأن ده بيتنفّذ في ctx.waitUntil() اللي ليه حد وقت
-async function callGemini(contents, { retries = 2 } = {}) {
-  const payload = JSON.stringify({
-    systemInstruction: { parts: [{ text: SYSTEM_PROMPT }] },
-    contents,
-    generationConfig: { temperature: 0.4, maxOutputTokens: 1200, ...fast() },
-    safetySettings: [
-      'HARM_CATEGORY_HARASSMENT',
-      'HARM_CATEGORY_HATE_SPEECH',
-      'HARM_CATEGORY_SEXUALLY_EXPLICIT',
-      'HARM_CATEGORY_DANGEROUS_CONTENT',
-    ].map((category) => ({ category, threshold: 'BLOCK_ONLY_HIGH' })),
-  });
+const thinkingFor = (model) => (/lite/.test(model) ? { thinkingConfig: { thinkingLevel: 'minimal' } } : {});
 
-  let lastErr;
-  for (let attempt = 0; attempt <= retries; attempt++) {
-    let res;
-    try {
-      res = await fetch(endpoint(), {
+/**
+ * سباق (منقول من البوت القديم): بنبعت المحاولة الأولى، ولو ما ردّتش خلال hedgeMs
+ * بنبعت اللي بعدها بالتوازي (أو فورًا لو الأولى فشلت) — وأول رد ناجح بيكسب والباقي بيتلغى.
+ * كده الرد ما بيستناش موديل مزحوم.
+ */
+function raceGemini(attempts, { hedgeMs = 5000, timeoutMs = 12000 } = {}) {
+  return new Promise((resolve, reject) => {
+    let next = 0;
+    let running = 0;
+    let done = false;
+    let lastErr = new Error('Gemini: مفيش محاولات');
+    let hedgeTimer;
+    const controllers = [];
+
+    const finish = (fn, v) => {
+      if (done) return;
+      done = true;
+      clearTimeout(hedgeTimer);
+      for (const c of controllers) c.abort();
+      fn(v);
+    };
+
+    const launch = () => {
+      if (done) return;
+      clearTimeout(hedgeTimer);
+      if (next >= attempts.length) {
+        if (running === 0) finish(reject, lastErr);
+        return;
+      }
+      const { model, body } = attempts[next++];
+      const ctrl = new AbortController();
+      controllers.push(ctrl);
+      // الووركر بيتقفل بعد ~30 ثانية — محاولة معلّقة ما تاكلش الوقت كله
+      const timeout = setTimeout(() => ctrl.abort(), timeoutMs);
+      running++;
+      hedgeTimer = setTimeout(launch, hedgeMs);
+      fetch(endpointFor(model), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        // الووركر بيتقفل بعد ~30 ثانية — محاولة معلّقة ما تاكلش الوقت كله
-        signal: AbortSignal.timeout(12000),
-        body: payload,
-      });
-    } catch (err) {
-      lastErr = err;
-      if (attempt < retries) {
-        await sleep(700 * 2 ** attempt);
-        continue;
-      }
-      throw err;
-    }
+        body,
+        signal: ctrl.signal,
+      })
+        .then(async (res) => {
+          if (!res.ok) {
+            const t = await res.text().catch(() => '');
+            throw new Error(`Gemini API ${model} ${res.status}: ${t.slice(0, 200)}`);
+          }
+          return res.json();
+        })
+        .then((data) => finish(resolve, data))
+        .catch((err) => {
+          if (done) return;
+          lastErr = err.name === 'AbortError' ? new Error(`Gemini ${model}: مهلة ${timeoutMs}ms`) : err;
+          console.warn('[gemini]', lastErr.message);
+        })
+        .finally(() => {
+          clearTimeout(timeout);
+          running--;
+          if (!done) launch();
+        });
+    };
+    launch();
+  });
+}
 
-    if (res.ok) return res.json();
+/**
+ * @param {{retries?: number, model?: string, gen?: object}} opts
+ *   model = موديل واحد بعينه (للتجربة من /debug/gemini)، وإلا الموديل الأساسي مرتين + الاحتياطيين
+ */
+async function callGemini(contents, { retries = 2, model = null, gen = {} } = {}) {
+  const bodyFor = (m) =>
+    JSON.stringify({
+      systemInstruction: { parts: [{ text: SYSTEM_PROMPT }] },
+      contents,
+      generationConfig: { temperature: 0.4, maxOutputTokens: 1200, ...thinkingFor(m), ...gen },
+      safetySettings: [
+        'HARM_CATEGORY_HARASSMENT',
+        'HARM_CATEGORY_HATE_SPEECH',
+        'HARM_CATEGORY_SEXUALLY_EXPLICIT',
+        'HARM_CATEGORY_DANGEROUS_CONTENT',
+      ].map((category) => ({ category, threshold: 'BLOCK_ONLY_HIGH' })),
+    });
+  const models = model
+    ? Array.from({ length: retries + 1 }, () => model)
+    : [config.gemini.model, config.gemini.model, ...config.gemini.fallbackModels];
+  return raceGemini(models.map((m) => ({ model: m, body: bodyFor(m) })));
+}
 
-    const body = await res.text().catch(() => '');
-    lastErr = new Error(`Gemini API ${res.status}: ${body.slice(0, 200)}`);
-
-    // 429 = تخطّي الحصة/المعدل، 500/503 = ازدحام مؤقت → نعيد المحاولة
-    if ([429, 500, 503].includes(res.status) && attempt < retries) {
-      const base = res.status === 429 ? 1500 : 700;
-      await sleep(base * 2 ** attempt); // 429: ~1.5s ثم ~3s
-      continue;
-    }
-    throw lastErr;
+/** للتجربة (/debug/gemini): وقت الرد والموديل الفعلي لموديل معيّن. */
+export async function debugGemini(text, model, gen = {}) {
+  const t0 = Date.now();
+  try {
+    const data = await callGemini([{ role: 'user', parts: [{ text }] }], { retries: 0, model, gen });
+    const parts = data.candidates?.[0]?.content?.parts || [];
+    return {
+      model,
+      gen,
+      ms: Date.now() - t0,
+      modelVersion: data.modelVersion,
+      usage: data.usageMetadata,
+      text: parts.map((p) => p.text).filter(Boolean).join(' ').slice(0, 120),
+    };
+  } catch (err) {
+    return { model, gen, ms: Date.now() - t0, error: err.message.slice(0, 300) };
   }
-  throw lastErr;
+}
+
+/** للتجربة (/debug/models): الموديلات المتاحة للمفتاح ده. */
+export async function listModels() {
+  const res = await fetch(`${config.gemini.baseUrl}/models?pageSize=200&key=${config.gemini.apiKey}`);
+  const j = await res.json().catch(() => ({}));
+  return (j.models || [])
+    .filter((m) => (m.supportedGenerationMethods || []).includes('generateContent'))
+    .map((m) => m.name.replace('models/', ''));
 }
 
 /**

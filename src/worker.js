@@ -16,6 +16,8 @@ import {
   extractDiscount,
   findElevatorCompanies,
   findContractors,
+  debugGemini,
+  listModels,
 } from './gemini.js';
 import {
   sendText,
@@ -56,7 +58,8 @@ import {
 import { catalogStats, searchProducts, stockSummary } from './catalog.js';
 import { synthesize } from './tts.js';
 import { computeInvoice, buildInvoiceXlsx } from './invoice.js';
-import { syncGoogleContacts, getContactInfo } from './contacts.js';
+import { syncGoogleContacts, getContactInfo, startConnect, finishConnect } from './contacts.js';
+import { noteError, noteFailedStatuses, flushDiag, diagPage, maskPhone } from './diag.js';
 import { sendMessengerText, parseMessengerIncoming } from './messenger.js';
 import { setEnvRef as setPriceEnvRef, setOverride, clearOverride } from './priceOverrides.js';
 import { normalizeAr } from './catalog.js';
@@ -105,6 +108,19 @@ export default {
     /* ---------- فحص صحة الخدمة ---------- */
     if (method === 'GET' && pathname === '/') {
       return new Response('QUDS WhatsApp bot ✅');
+    }
+
+    // سياسة الخصوصية (ميتا بتطلب رابط ليها في إعدادات التطبيق)
+    if (method === 'GET' && pathname === '/privacy') {
+      return new Response(PRIVACY_HTML, { headers: { 'Content-Type': 'text/html; charset=utf-8' } });
+    }
+
+    // ربط جهات اتصال جوجل من المتصفح: افتح /google/connect ووافق بحساب المحل
+    if (method === 'GET' && (pathname === '/oauth/start' || pathname === '/google/connect')) {
+      return startConnect(url, env);
+    }
+    if (method === 'GET' && (pathname === '/oauth/callback' || pathname === '/google/callback')) {
+      return finishConnect(url, env);
     }
 
     if (method === 'GET' && pathname === '/health') {
@@ -177,6 +193,39 @@ export default {
       }
     }
 
+    // سجل التشخيص: رسايل وصلت + مشاكل إرسال واتساب (من الموبايل)
+    if (method === 'GET' && pathname === '/debug/log' && env.ENABLE_DEBUG_CHAT === '1') {
+      return diagPage(env);
+    }
+
+    //   GET /debug/gemini?model=...&text=...&gen={...}  → وقت الرد لموديل معيّن
+    if (pathname === '/debug/gemini' && env.ENABLE_DEBUG_CHAT === '1') {
+      let gen = {};
+      try {
+        gen = JSON.parse(url.searchParams.get('gen') || '{}');
+      } catch {
+        /* gen غلط — نكمّل من غيره */
+      }
+      const model = url.searchParams.get('model') || config.gemini.model;
+      const text = url.searchParams.get('text') || 'بكام الباب الفورجيه؟ رد في سطر واحد.';
+      return Response.json(await debugGemini(text, model, gen));
+    }
+    if (pathname === '/debug/models' && env.ENABLE_DEBUG_CHAT === '1') {
+      return Response.json(await listModels());
+    }
+    //   POST /debug/voice (جسم الطلب = ملف صوت) → النص المفرّغ
+    if (method === 'POST' && pathname === '/debug/voice' && env.ENABLE_DEBUG_CHAT === '1') {
+      const t0 = Date.now();
+      try {
+        const buf = await request.arrayBuffer();
+        const mime = request.headers.get('content-type') || 'audio/ogg';
+        const text = await transcribeAudio(buf, mime);
+        return Response.json({ text, bytes: buf.byteLength, ms: Date.now() - t0 });
+      } catch (err) {
+        return Response.json({ error: err.message, ms: Date.now() - t0 }, { status: 500 });
+      }
+    }
+
     if (pathname === '/debug/search' && env.ENABLE_DEBUG_CHAT === '1') {
       const q = url.searchParams.get('q') || '';
       try {
@@ -229,6 +278,7 @@ export default {
       }
 
       const messages = parseIncoming(body);
+      noteFailedStatuses(body);
       ctx.waitUntil(
         (async () => {
           for (const msg of messages) {
@@ -237,8 +287,11 @@ export default {
               await handleMessage(msg, env);
             } catch (err) {
               console.error('[handleMessage] خطأ:', err);
+              noteError(`[handleMessage] ${err.message}`);
             }
           }
+          const incoming = messages.map((m) => `${maskPhone(m.from)} (${m.type})`).join('، ');
+          await flushDiag(env, incoming);
         })(),
       );
 
@@ -311,10 +364,35 @@ export default {
 const MAX_AUDIO_BYTES = 3 * 1024 * 1024; // فوق كده تفريغ الـ base64 ممكن يعدّي حد الـ CPU
 const MAX_IMAGE_BYTES = 4 * 1024 * 1024;
 
-/** الاسم الأول من اسم جوجل/واتساب ("محمد علي" → "محمد")، أو null لو مش اسم (إيموجي/أرقام). */
-function firstName(name) {
-  const w = String(name || '').trim().split(/\s+/)[0] || '';
-  return /^\p{L}{2,}$/u.test(w) ? w : null;
+const PRIVACY_HTML = `<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width">
+<title>Privacy Policy - Quds Bot</title>
+<body style="font-family:sans-serif;max-width:720px;margin:auto;padding:24px;line-height:1.7">
+<h2 dir="rtl">سياسة الخصوصية - بوت القدس لمهمات المصاعد</h2>
+<p dir="rtl">البوت ده بيرد على عملاء محل القدس لمهمات المصاعد (الجيزة) على واتساب بالأسعار والمنتجات.
+البوت بيقرا أسماء وأرقام جهات الاتصال من حساب جوجل الخاص بالمحل بس، عشان ينادي العميل باسمه.
+البيانات دي بتتحفظ عند المحل ومبتتشاركش ولا بتتباع لأي حد.</p>
+<h2>Privacy Policy - Quds Elevator Supplies Bot</h2>
+<p>This WhatsApp bot answers customers of Quds Elevator Supplies (Giza, Egypt) with product prices.
+It reads contact names and phone numbers (read-only) from the shop's own Google account only, to greet
+customers by name. This data is stored privately by the shop and is never shared or sold.
+Contact: toppowerelevators4@gmail.com</p>
+</body>`;
+
+// ألقاب محفوظة في جهات الاتصال ("حاج سيد"، "م/ علي") — بنسيبها زي ما هي (من البوت القديم)
+const TITLE_RE = /^(أستاذ|استاذ|أستاذة|استاذة|أ\/|ا\/|حاج|الحاج|حجة|الحاجة|مهندس|م\/|م\.|دكتور|د\/|د\.|شيخ|الشيخ|مدام|أ\.)/;
+
+/**
+ * اسم الترحيب من اسم جوجل/واتساب: "حاج سيد محمود" → "حاج سيد"، "محمد علي" → "أستاذ محمد"،
+ * أو null لو مش اسم (إيموجي/أرقام).
+ */
+function politeName(name) {
+  const words = String(name || '').trim().split(/\s+/).filter(Boolean);
+  if (!words.length) return null;
+  if (TITLE_RE.test(words[0])) {
+    const titled = words.slice(0, 2).join(' ');
+    return /\p{L}{2,}/u.test(titled) ? titled : null;
+  }
+  return /^\p{L}{2,}$/u.test(words[0]) ? `أستاذ ${words[0]}` : null;
 }
 
 /** الرد فيه أرقام (أسعار/أكواد منتجات) تستاهل تتبعت مكتوبة بعد الصوت؟ */
@@ -402,6 +480,7 @@ async function handleMessage(msg, env) {
       }
     } catch (err) {
       console.error('[voice] خطأ:', err.message);
+      noteError(`[voice] ${err.message}`);
       await sendText(
         from,
         'حصلت مشكلة في تحويل الصوت لنص. اكتبلي اسم المنتج من فضلك 🙏',
@@ -539,12 +618,13 @@ async function handleMessage(msg, env) {
   let reply;
   let products = [];
   try {
-    const out = await generateReply(text, history, { customerName: firstName(displayName) });
+    const out = await generateReply(text, history, { customerName: politeName(displayName) });
     reply = out.reply;
     products = out.products || [];
     await saveHistory(from, out.history, env);
   } catch (err) {
     console.error('[gemini] خطأ:', err.message);
+    noteError(`[gemini] ${err.message}`);
     reply = `معلش حصل خطأ مؤقت. جرّب تاني بعد شوية أو كلمنا على واتساب: ${config.store.whatsapp}`;
   }
 
@@ -666,6 +746,7 @@ async function handleMessengerMessage(psid, text, env) {
     await saveHistory(from, out.history, env);
   } catch (err) {
     console.error('[gemini] خطأ:', err.message);
+    noteError(`[gemini] ${err.message}`);
     reply = `معلش حصل خطأ مؤقت. جرّب تاني بعد شوية أو كلمنا على واتساب: ${config.store.whatsapp}`;
   }
 
@@ -1047,15 +1128,48 @@ async function handleAgentMessage(agent, text, env, contextId) {
     }
   }
   if (!target) {
-    await sendText(
-      agent,
-      'اكتب رقم العميل في أول الرسالة، مثال:\n201234567890 السعر متاح عندنا\n' +
-        'أو اعمل "رد" (quote) على أي رسالة عميل وصلتك واكتب ردك.',
-    );
+    // سؤال عادي من الموظف (مش موجّه لعميل) → البوت يجاوبه (منقول من البوت القديم)
+    await handleAdminQuestion(agent, t, env);
     return;
   }
 
   await relayToCustomer(agent, target, body, env);
+}
+
+// تحية المدير (من البوت القديم) — "حاج محمد" للمدير بس، مش للعملاء ولا باقي الموظفين
+const ADMIN_GREETING = 'أهلاً يا حاج محمد 👋';
+const STAFF_GREETING = 'أهلاً بحضرتك 👋';
+
+/** سؤال حر من موظف → البوت يرد بنفس محرك الأسعار، مع التحية + تذكير إزاي يبعت لعميل. */
+async function handleAdminQuestion(agent, text, env) {
+  const greeting = agent === config.agent.manager ? ADMIN_GREETING : STAFF_GREETING;
+  if (['/reset', 'ابدأ من جديد', 'ابدا من جديد', 'restart'].includes(text.toLowerCase())) {
+    await resetHistory(agent, env);
+    await sendText(agent, `${greeting}\nاتمسحت المحادثة. اسأل عن أي منتج 👍`);
+    return;
+  }
+  const history = await getHistory(agent, env);
+  let reply;
+  let products = [];
+  try {
+    const out = await generateReply(text, history);
+    reply = out.reply;
+    products = out.products || [];
+    await saveHistory(agent, out.history, env);
+  } catch (err) {
+    console.error('[gemini] خطأ:', err.message);
+    noteError(`[gemini] ${err.message}`);
+    reply = 'معلش حصل خطأ مؤقت. جرّب تاني بعد شوية.';
+  }
+  // العلامات الداخلية (عرض تركيب/زراير/مورّد) مالهاش معنى مع الموظف
+  reply = reply.replace(/\[\[[A-Z_]+\]\]/g, '').trim() || 'تحت أمرك 🙏';
+  await sendText(
+    agent,
+    `${greeting}\n${reply}\n\n` +
+      '(عشان تبعت لعميل: اكتب رقمه في أول الرسالة، أو اعمل "رد" على رسالته)',
+  );
+  await sendProductImages(agent, reply, products, wantsImage(text));
+  console.log(`[admin ${agent}] ${text} → ${reply.replace(/\n/g, ' ')}`);
 }
 
 /** يبعت رسالة الموظف للعميل، ويخلّي ردود العميل الجاية توصل للموظف ده (والبوت يسكت معاه). */

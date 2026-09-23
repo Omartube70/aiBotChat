@@ -10,14 +10,19 @@
  *  - تلقائيًا كل شوية عبر Cron Trigger (شوف wrangler.toml + scheduled() في worker.js)
  *  - يدويًا لما موظف يكتب على واتساب: "حدث الاسماء"
  *
- * محتاج 3 secrets (تتحط بـ: npx wrangler secret put <NAME>):
- *   GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, GOOGLE_REFRESH_TOKEN
- * شوف تعليمات الحصول عليهم في رسالة الشات.
+ * محتاج GOOGLE_CLIENT_ID و GOOGLE_CLIENT_SECRET (secrets)، والـ refresh token يا إما:
+ *   - secret اسمه GOOGLE_REFRESH_TOKEN، أو
+ *   - صاحب المحل يفتح <الووركر>/google/connect ويوافق بحساب المحل (منقول من البوت القديم)
+ *     والتوكن بيتحفظ في KV (google:refresh).
  */
+import { config } from './config.js';
 
 const CONTACTS_KEY = 'contacts:map';
 const PEOPLE_API = 'https://people.googleapis.com/v1/people/me/connections';
 const TOKEN_URL = 'https://oauth2.googleapis.com/token';
+const REFRESH_KEY = 'google:refresh';
+const stateKey = (s) => `google:state:${s}`;
+const SCOPES = 'https://www.googleapis.com/auth/contacts.readonly openid email';
 
 /** يطبّع رقم مصري لنفس الصيغة اللي واتساب بيبعتها (20XXXXXXXXXX من غير +). */
 export function normalizePhoneEG(raw) {
@@ -34,7 +39,8 @@ export function normalizePhoneEG(raw) {
 }
 
 async function getAccessToken(env) {
-  const { GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, GOOGLE_REFRESH_TOKEN } = env;
+  const { GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET } = env;
+  const GOOGLE_REFRESH_TOKEN = env.GOOGLE_REFRESH_TOKEN || (await env?.MEMORY?.get(REFRESH_KEY));
   if (!GOOGLE_CLIENT_ID || !GOOGLE_CLIENT_SECRET || !GOOGLE_REFRESH_TOKEN) {
     throw new Error('إعدادات جوجل ناقصة (GOOGLE_CLIENT_ID / GOOGLE_CLIENT_SECRET / GOOGLE_REFRESH_TOKEN)');
   }
@@ -73,8 +79,10 @@ async function fetchAllContacts(accessToken) {
       const photoObj = (person.photos || []).find((p) => p.default !== true && p.url);
       const photo = photoObj ? photoObj.url : null;
       for (const p of person.phoneNumbers || []) {
-        const phone = normalizePhoneEG(p.value);
-        if (phone && !map[phone]) map[phone] = { name, photo };
+        for (const raw of [p.canonicalForm, p.value]) {
+          const phone = normalizePhoneEG(raw);
+          if (phone && !map[phone]) map[phone] = { name, photo };
+        }
       }
     }
     pageToken = data.nextPageToken || '';
@@ -98,5 +106,106 @@ export async function getContactInfo(waId, env) {
   if (!kv) return null;
   const map = await kv.get(CONTACTS_KEY, 'json');
   if (!map) return null;
-  return map[waId] || null;
+  const hit = map[waId];
+  // البوت القديم كان بيخزّن الاسم كنص بس
+  return typeof hit === 'string' ? { name: hit, photo: null } : hit || null;
+}
+
+/* ---------- ربط جوجل من المتصفح (منقول من البوت القديم) ---------- */
+
+function page(title, body) {
+  return new Response(
+    `<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width"><body dir="rtl" style="font-family:sans-serif;padding:24px;font-size:18px"><h2>${title}</h2><p>${body}</p></body>`,
+    { headers: { 'Content-Type': 'text/html; charset=utf-8' } },
+  );
+}
+
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c]);
+}
+
+function decodeJwt(jwt) {
+  try {
+    const b64 = String(jwt).split('.')[1].replace(/-/g, '+').replace(/_/g, '/');
+    const bytes = Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
+    return JSON.parse(new TextDecoder().decode(bytes));
+  } catch {
+    return {};
+  }
+}
+
+function redirectUri(url) {
+  const base = url.pathname.startsWith('/oauth/') ? '/oauth' : '/google';
+  return `${url.origin}${base}/callback`;
+}
+
+/** GET /google/connect → يحوّل لصفحة موافقة جوجل. */
+export async function startConnect(url, env) {
+  const { GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET } = env;
+  if (!GOOGLE_CLIENT_ID || !GOOGLE_CLIENT_SECRET) {
+    return page(
+      'لسه مفاتيح جوجل مش متحطوطة في Cloudflare.',
+      `رابط الرجوع (Redirect URI) اللي هتحتاجه:<br><code>${redirectUri(url)}</code>`,
+    );
+  }
+  const state = crypto.randomUUID();
+  await env.MEMORY.put(stateKey(state), '1', { expirationTtl: 600 });
+  const q = new URLSearchParams({
+    client_id: GOOGLE_CLIENT_ID,
+    redirect_uri: redirectUri(url),
+    response_type: 'code',
+    scope: SCOPES,
+    access_type: 'offline',
+    prompt: 'consent',
+    login_hint: config.google.accountEmail,
+    state,
+  });
+  return Response.redirect(`https://accounts.google.com/o/oauth2/v2/auth?${q}`, 302);
+}
+
+/** GET /google/callback → يحفظ الـ refresh token في KV ويعمل أول مزامنة. */
+export async function finishConnect(url, env) {
+  const code = url.searchParams.get('code');
+  const state = url.searchParams.get('state') || '';
+  if (!code) return page('الإذن اتلغى أو حصلت مشكلة.', 'جرّب تفتح رابط الربط تاني.');
+  if (!(await env.MEMORY.get(stateKey(state)))) {
+    return page('الرابط ده قديم.', 'افتح رابط الربط من الأول.');
+  }
+  await env.MEMORY.delete(stateKey(state));
+  const res = await fetch(TOKEN_URL, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({
+      code,
+      client_id: env.GOOGLE_CLIENT_ID,
+      client_secret: env.GOOGLE_CLIENT_SECRET,
+      redirect_uri: redirectUri(url),
+      grant_type: 'authorization_code',
+    }),
+  });
+  const tok = await res.json().catch(() => ({}));
+  if (!res.ok || !tok.refresh_token) {
+    console.error('[google] token خطأ:', res.status, JSON.stringify(tok));
+    const why = [res.status, tok.error, tok.error_description].filter(Boolean).join(' — ');
+    return page(
+      'جوجل مرجّعش الإذن كامل.',
+      `افتح رابط الربط تاني ووافق على كل حاجة.<br><small dir="ltr">${escapeHtml(why)}</small>`,
+    );
+  }
+  const claims = decodeJwt(tok.id_token);
+  const email = String(claims.email || '').toLowerCase();
+  if (!claims.email_verified || email !== config.google.accountEmail.toLowerCase()) {
+    return page(
+      'الحساب ده مش حساب المحل.',
+      `دخلت بـ ${escapeHtml(email || 'حساب غير معروف')}، لازم تدخل بـ ${config.google.accountEmail}.`,
+    );
+  }
+  await env.MEMORY.put(REFRESH_KEY, tok.refresh_token);
+  try {
+    const n = await syncGoogleContacts(env);
+    return page('تم ربط جهات الاتصال ✅', `البوت عرف ${n} رقم، وهيحدّثهم لوحده كل شوية.`);
+  } catch (err) {
+    console.error('[google] sync خطأ:', err.message);
+    return page('الربط تم ✅ بس أول تحديث فشل.', 'هيحاول تاني لوحده بعد شوية.');
+  }
 }

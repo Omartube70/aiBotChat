@@ -14,6 +14,8 @@ export const config = {
     model: 'gemini-flash-lite-latest',
     audioModel: 'gemini-flash-lite-latest', // أسرع ومش بيزدحم زي flash؛ flash العادي احتياطي لو فشل
     baseUrl: 'https://generativelanguage.googleapis.com/v1beta',
+    // GEMINI_FALLBACK_MODELS — بيدخلوا السباق لو الأساسي اتأخر أو فشل (من البوت القديم)
+    fallbackModels: ['gemini-3.5-flash-lite', 'gemini-3-flash-preview'],
   },
 
   whatsapp: {
@@ -74,6 +76,11 @@ export const config = {
     payroll: ['201000363323'], // AGENT_PAYROLL — الرواتب من الرقم ده بس
   },
 
+  // ربط جهات اتصال جوجل من المتصفح (/google/connect) — الحساب الوحيد المسموح بربطه
+  google: {
+    accountEmail: 'toppower4444@gmail.com', // GOOGLE_ACCOUNT_EMAIL
+  },
+
   catalogTtlMs: 300 * 1000,
 };
 
@@ -91,6 +98,10 @@ export function applyEnv(env = {}) {
   config.gemini.apiKey = g('GEMINI_API_KEY');
   config.gemini.model = g('GEMINI_MODEL', config.gemini.model);
   config.gemini.audioModel = g('GEMINI_AUDIO_MODEL', config.gemini.audioModel);
+  config.gemini.fallbackModels = g('GEMINI_FALLBACK_MODELS', config.gemini.fallbackModels.join(','))
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean);
 
   config.whatsapp.phoneNumberId = g('WHATSAPP_PHONE_NUMBER_ID');
   config.whatsapp.token = g('WHATSAPP_TOKEN');
@@ -150,6 +161,8 @@ export function applyEnv(env = {}) {
 
   const ttl = Number(g('CATALOG_TTL_SECONDS', '300'));
   config.catalogTtlMs = (Number.isFinite(ttl) && ttl > 0 ? ttl : 300) * 1000;
+
+  config.google.accountEmail = g('GOOGLE_ACCOUNT_EMAIL', config.google.accountEmail);
 
   config.port = Number(g('PORT', '3000')) || 3000;
 

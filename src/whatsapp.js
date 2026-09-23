@@ -1,4 +1,5 @@
 import { config } from './config.js';
+import { logErr } from './diag.js';
 
 const W = config.whatsapp;
 
@@ -34,7 +35,7 @@ export async function sendText(to, body) {
 
   if (!res.ok) {
     const errText = await res.text().catch(() => '');
-    console.error(`[whatsapp] فشل الإرسال ${res.status}: ${errText.slice(0, 400)}`);
+    logErr(`[whatsapp] فشل الإرسال ${res.status}: ${errText.slice(0, 400)}`);
     return null;
   }
   try {
@@ -68,7 +69,7 @@ export async function sendDocument(to, mediaId, filename, caption) {
   });
   if (!res.ok) {
     const t = await res.text().catch(() => '');
-    console.error(`[whatsapp] فشل إرسال الملف ${res.status}: ${t.slice(0, 300)}`);
+    logErr(`[whatsapp] فشل إرسال الملف ${res.status}: ${t.slice(0, 300)}`);
     return false;
   }
   return true;
@@ -93,7 +94,7 @@ export async function sendImage(to, link, caption) {
   });
   if (!res.ok) {
     const t = await res.text().catch(() => '');
-    console.error(`[whatsapp] فشل إرسال الصورة ${res.status}: ${t.slice(0, 300)}`);
+    logErr(`[whatsapp] فشل إرسال الصورة ${res.status}: ${t.slice(0, 300)}`);
     return false;
   }
   return true;
@@ -123,7 +124,7 @@ export async function sendLocation(to, { lat, lng, name, address }) {
   });
   if (!res.ok) {
     const t = await res.text().catch(() => '');
-    console.error(`[whatsapp] فشل إرسال الموقع ${res.status}: ${t.slice(0, 300)}`);
+    logErr(`[whatsapp] فشل إرسال الموقع ${res.status}: ${t.slice(0, 300)}`);
     return false;
   }
   return true;
@@ -158,7 +159,7 @@ export async function sendContact(to, { name, phone, address, note }) {
   });
   if (!res.ok) {
     const t = await res.text().catch(() => '');
-    console.error(`[whatsapp] فشل إرسال جهة الاتصال ${res.status}: ${t.slice(0, 300)}`);
+    logErr(`[whatsapp] فشل إرسال جهة الاتصال ${res.status}: ${t.slice(0, 300)}`);
     return false;
   }
   return true;
@@ -195,7 +196,7 @@ export async function sendButtons(to, body, buttons) {
   });
   if (!res.ok) {
     const t = await res.text().catch(() => '');
-    console.error(`[whatsapp] فشل إرسال الزراير ${res.status}: ${t.slice(0, 300)}`);
+    logErr(`[whatsapp] فشل إرسال الزراير ${res.status}: ${t.slice(0, 300)}`);
     return false;
   }
   return true;
@@ -238,7 +239,7 @@ export async function sendFlow(to, { flowId, flowToken, screen, body, cta, heade
   });
   if (!res.ok) {
     const t = await res.text().catch(() => '');
-    console.error(`[whatsapp] فشل إرسال الفورم ${res.status}: ${t.slice(0, 300)}`);
+    logErr(`[whatsapp] فشل إرسال الفورم ${res.status}: ${t.slice(0, 300)}`);
     return false;
   }
   return true;
@@ -259,7 +260,7 @@ export async function uploadMedia(buffer, mimeType = 'audio/ogg', filename = 're
   });
   if (!res.ok) {
     const t = await res.text().catch(() => '');
-    console.error(`[whatsapp] فشل رفع الوسائط ${res.status}: ${t.slice(0, 300)}`);
+    logErr(`[whatsapp] فشل رفع الوسائط ${res.status}: ${t.slice(0, 300)}`);
     return null;
   }
   const j = await res.json().catch(() => ({}));
@@ -285,7 +286,7 @@ export async function sendAudio(to, mediaId) {
   });
   if (!res.ok) {
     const t = await res.text().catch(() => '');
-    console.error(`[whatsapp] فشل إرسال الصوت ${res.status}: ${t.slice(0, 300)}`);
+    logErr(`[whatsapp] فشل إرسال الصوت ${res.status}: ${t.slice(0, 300)}`);
     return false;
   }
   return true;
@@ -324,7 +325,7 @@ export async function fetchMedia(mediaId) {
     headers: { Authorization: `Bearer ${W.token}` },
   });
   if (!metaRes.ok) {
-    console.error(`[whatsapp] فشل جلب بيانات الوسائط ${metaRes.status}`);
+    logErr(`[whatsapp] فشل جلب بيانات الوسائط ${metaRes.status}`);
     return null;
   }
   const meta = await metaRes.json();
@@ -334,7 +335,7 @@ export async function fetchMedia(mediaId) {
     headers: { Authorization: `Bearer ${W.token}` },
   });
   if (!fileRes.ok) {
-    console.error(`[whatsapp] فشل تنزيل الوسائط ${fileRes.status}`);
+    logErr(`[whatsapp] فشل تنزيل الوسائط ${fileRes.status}`);
     return null;
   }
   const buffer = await fileRes.arrayBuffer();

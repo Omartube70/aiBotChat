@@ -144,6 +144,20 @@ export async function apiSearch(keyword) {
   return fetchAllPages(keyword, 6);
 }
 
+// نتايج البحث بالكلمة بتتحفظ لنفس مدة الكاش (منقول من البوت القديم) —
+// نفس السؤال ("كالون"، "طرمبة") بيتكرر كتير فبيرد على طول من غير نداء API.
+const searchCache = new Map();
+function cachedApiSearch(term) {
+  const key = normalizeAr(term);
+  const hit = searchCache.get(key);
+  if (hit && Date.now() - hit.at < config.catalogTtlMs) return hit.promise;
+  const promise = apiSearch(term);
+  promise.catch(() => searchCache.delete(key));
+  if (searchCache.size > 500) searchCache.clear();
+  searchCache.set(key, { at: Date.now(), promise });
+  return promise;
+}
+
 /* ----------------------------- الكاش ----------------------------- */
 
 let cache = { products: [], fetchedAt: 0, loading: null };
@@ -318,7 +332,7 @@ export async function searchProducts(query, limit = 8, { raw = false } = {}) {
 
   const results = await Promise.all(
     uniqueQueries.map((term) =>
-      apiSearch(term).catch((err) => {
+      cachedApiSearch(term).catch((err) => {
         console.warn(`[catalog] بحث "${term}" فشل:`, err.message);
         return [];
       }),
