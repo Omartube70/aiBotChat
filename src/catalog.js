@@ -245,6 +245,38 @@ function loose(w) {
     .replace(/(.)\1+/g, '$1');
 }
 
+// جمع تكسير/أسماء شائعة → اسم المنتج في الكتالوج
+const SYNONYMS = {
+  كوالين: 'كالون', كوالون: 'كالون', مكاين: 'ماكينه', مكن: 'ماكينه', ماكينات: 'ماكينه',
+  كروت: 'كارت', كرت: 'كارت', ابواب: 'باب', اسلاك: 'سلك', كابلات: 'كبل', كيبل: 'كبل',
+  كابل: 'كبل', وير: 'واير', wire: 'واير', طلمبه: 'طرمبه', طلمبات: 'طرمبه', مواتير: 'موتور',
+  زراير: 'زرار', ازرار: 'زرار', حبال: 'حبل', كراسي: 'كرسي',
+};
+
+// نفس الجدول بس المفاتيح بالشكل "المرن" (طلمبه → تلمبه) عشان تتقارن بـ loose()
+const LOOSE_SYN = Object.fromEntries(Object.entries(SYNONYMS).map(([k, v]) => [loose(k), v]));
+
+/** "الوايرات" → "واير"، "طرمبات" → "ترمب"، "ماكينه" → "ماكين": من غير ال والجمع والتأنيث. */
+function stem(w) {
+  let s = loose(w);
+  if (LOOSE_SYN[s]) s = loose(LOOSE_SYN[s]);
+  for (const suf of ['ات', 'ين', 'ون', 'ان', 'ه', 'ي']) {
+    if (s.endsWith(suf) && s.length - suf.length >= 3) {
+      s = s.slice(0, -suf.length);
+      break;
+    }
+  }
+  return s;
+}
+
+/** نفس الكلمة؟ (بالجذر من الناحيتين — "ماكين" = "ماكينه"، "الوايرات" = "واير") */
+function sameWord(a, b) {
+  const sa = stem(a);
+  const sb = stem(b);
+  if (sa.length < 3 || sb.length < 3) return false;
+  return sa === sb || sa === loose(b) || loose(a) === sb;
+}
+
 /** هيكل الكلمة من غير حروف المد والهاء الأخيرة: ماكنه=ماكينه، كلون=كالون، حبال=حبل، زراير=زرار. */
 function skeleton(w) {
   return loose(w).replace(/[اوي]/g, '').replace(/ه$/, '');
@@ -284,6 +316,10 @@ function scoreMatch(product, terms) {
     if (name.includes(t) || name.includes(raw)) {
       score += 3;
       exact = true;
+    } else if (nameWords.some((w) => sameWord(w, t))) {
+      // نفس الكلمة بس بـ"ال" أو جمع أو تاء مربوطة زيادة/ناقصة → مطابقة كاملة مش تقريبية
+      score += 3;
+      exact = true;
     } else if (hay.includes(t) || hay.includes(raw)) {
       score += 1;
       exact = true;
@@ -319,6 +355,11 @@ export async function searchProducts(query, limit = 8, { raw = false } = {}) {
     queries.push(t);
     const s = stripAl(t);
     if (s !== t) queries.push(s);
+    // "الوايرات" → بحث بـ"واير" كمان، و"كوالين" → "كالون"
+    const syn = LOOSE_SYN[loose(t)];
+    if (syn) queries.push(syn);
+    const st = stem(t);
+    if (st.length >= 3 && st !== s) queries.push(st);
   }
   // نستبعد التكرار، وبعدين نبعت كل الاستعلامات بالتوازي (مش تسلسلي) — أسرع بكتير
   const tried = new Set();

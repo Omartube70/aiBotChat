@@ -2747,14 +2747,21 @@ async function sendProductImages(to, reply, products, forceTop = false) {
   const r = arKey(reply);
 
   const withImg = products.filter((p) => p['الاسم'] && p.imageUrl);
-  let list = withImg.filter((p) => r.includes(arKey(p['الاسم'])));
+  // المنتج اتذكر في الرد: بالاسم كامل، أو بكل كلماته تقريبًا (الرد ممكن يكتب "يمين" بدل "يمن")
+  const mentioned = (p) => {
+    const name = arKey(p['الاسم']);
+    if (r.includes(name)) return true;
+    const words = name.split(' ').filter((w) => w.length >= 2);
+    return words.length >= 2 && words.filter((w) => r.includes(w)).length >= words.length - 1;
+  };
+  let list = withImg.filter(mentioned);
   if (list.length === 0 && forceTop) list = withImg.slice(0, 2);
 
-  // dedupe بالصورة، وحد أقصى 3
+  // dedupe بالصورة، وحد أقصى 10 (كل المنتجات اللي اتعرضت في الرد)
   const seen = new Set();
   const picked = [];
   for (const p of list) {
-    if (picked.length >= 3 || seen.has(p.imageUrl)) continue;
+    if (picked.length >= 10 || seen.has(p.imageUrl)) continue;
     seen.add(p.imageUrl);
     picked.push(p);
   }
