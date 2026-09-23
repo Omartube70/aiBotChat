@@ -311,6 +311,12 @@ export default {
 const MAX_AUDIO_BYTES = 3 * 1024 * 1024; // فوق كده تفريغ الـ base64 ممكن يعدّي حد الـ CPU
 const MAX_IMAGE_BYTES = 4 * 1024 * 1024;
 
+/** الاسم الأول من اسم جوجل/واتساب ("محمد علي" → "محمد")، أو null لو مش اسم (إيموجي/أرقام). */
+function firstName(name) {
+  const w = String(name || '').trim().split(/\s+/)[0] || '';
+  return /^\p{L}{2,}$/u.test(w) ? w : null;
+}
+
 /** الرد فيه أرقام (أسعار/أكواد منتجات) تستاهل تتبعت مكتوبة بعد الصوت؟ */
 function hasPricesOrCodes(text) {
   return /[0-9٠-٩]{2,}|ج\.?\s?م|جنيه|[A-Za-z]+[-_]?[0-9]+/.test(String(text));
@@ -533,7 +539,7 @@ async function handleMessage(msg, env) {
   let reply;
   let products = [];
   try {
-    const out = await generateReply(text, history);
+    const out = await generateReply(text, history, { customerName: firstName(displayName) });
     reply = out.reply;
     products = out.products || [];
     await saveHistory(from, out.history, env);
@@ -1961,6 +1967,9 @@ function wantsMaintenance(text) {
   if (/صيان|صين|عطل|اشترا?ك|شهري|عقد صيان/.test(s)) return true;
   // "بتعملوا/بتاخدوا ..." مع مصعد أو شهر (من غير اسم قطعة) — "بتاخدوا كام في الشهر"
   const lift = /مصعد|مصاعد|[اأ]?[سص]ا?[نت][سص]ي?ر/.test(s);
+  // "المصعد واقف / مش شغال / فيه مشكلة / بيزيق" = عطل → صيانة (مش سؤال عن قطعة)
+  const part = /طرمب|كالون|كامه|ماكين|مكنه|كارت|باب|زرار|وقفه/.test(s);
+  if (lift && !part && /واقف|وقف|مش شغال|مبيشتغلش|مشكل|بيزيق|بيخبط|بيرجع/.test(s)) return true;
   return /بت?(عمل|[اأ]?خد)/.test(s) && (lift || /شهر/.test(s)) && !/طرمب|كالون|كامه|ماكين/.test(s);
 }
 

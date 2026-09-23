@@ -8,6 +8,8 @@ const SYSTEM_PROMPT = `أنت موظف خدمة عملاء ودود في متج�
 
 قواعد مهمة:
 - اتكلم بالعامية المصرية البسيطة، بأسلوب محترم ومختصر (رسائل واتساب قصيرة).
+- الترحيب: لو فيه "اسم العميل" في الرسالة، رحّب بيه في أول رد بـ "أهلاً يا أستاذ <اسمه>"، ولو مفيش اسم قول "أهلاً بحضرتك".
+  **ممنوع تخترع اسم للعميل أو تقول "يا حاج" أو أي اسم مش مكتوب قدامك.** ومتكررش الترحيب في كل رسالة.
 - في كل رسالة هتلاقي قسم "منتجات من الكتالوج" فيه نتائج بحث فعلية من المتجر. اعتمد عليه فقط.
 - لا تخترع أي سعر أو منتج. لو مفيش نتائج مناسبة في القسم ده، قول للعميل إنك مش لاقي المنتج بالاسم ده،
   واطلب منه يوضّح الاسم أكتر أو يبعت صورة، واداله رقم المحل: ${S.phone}.
@@ -194,7 +196,7 @@ async function gatherProducts(userText, history) {
 }
 
 /** قسم المنتجات اللي بيتحقن مع رسالة العميل (من غير المفاتيح الداخلية). */
-function buildContext(userText, products) {
+function buildContext(userText, products, customerName) {
   const forModel = products.map((p) =>
     Object.fromEntries(
       Object.entries(p).filter(([k]) => k !== 'imageUrl' && !k.startsWith('_')),
@@ -203,17 +205,19 @@ function buildContext(userText, products) {
   const block = forModel.length
     ? JSON.stringify(forModel, null, 1)
     : '(مفيش نتائج مطابقة في الكتالوج)';
-  return `منتجات من الكتالوج (نتيجة بحث فعلية عن رسالة العميل):\n${block}\n\n---\nرسالة العميل:\n${userText}`;
+  const nameLine = customerName ? `اسم العميل: ${customerName}\n` : '';
+  return `منتجات من الكتالوج (نتيجة بحث فعلية عن رسالة العميل):\n${block}\n\n---\n${nameLine}رسالة العميل:\n${userText}`;
 }
 
 /**
  * @param {string} userText رسالة العميل
  * @param {Array} history سجل المحادثة بصيغة Gemini contents [{role, parts}] (رسائل نضيفة بدون سياق)
+ * @param {{customerName?: string}} [opts] اسم العميل (من جوجل أو بروفايل واتساب) للترحيب
  * @returns {Promise<{reply: string, history: Array, products: Array}>}
  */
-export async function generateReply(userText, history = []) {
+export async function generateReply(userText, history = [], { customerName } = {}) {
   const products = await gatherProducts(userText, history);
-  const augmented = buildContext(userText, products);
+  const augmented = buildContext(userText, products, customerName);
   const contents = [...history, { role: 'user', parts: [{ text: augmented }] }];
 
   let reply;
