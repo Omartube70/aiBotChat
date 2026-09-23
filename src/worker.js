@@ -395,6 +395,18 @@ function politeName(name) {
   return /^\p{L}{2,}$/u.test(words[0]) ? `أستاذ ${words[0]}` : null;
 }
 
+/**
+ * يضمن إن أول رد فيه "أهلاً يا <الاسم> 👋" (أو "أهلاً بحضرتك 👋" لو مفيش اسم).
+ * لو Gemini كتب ترحيب عام من غير الاسم، بنشيله ونحط ترحيب بالاسم مكانه.
+ */
+function withGreeting(reply, name) {
+  const greet = name ? `أهلاً يا ${name} 👋` : 'أهلاً بحضرتك 👋';
+  const head = reply.slice(0, 80);
+  if (name ? head.includes(name.split(' ').pop()) : /أهلا|اهلا|مرحب|وعليكم/.test(head)) return reply;
+  const rest = reply.replace(/^\s*(?:أهلاً|أهلا|اهلا|اهلاً|مرحبا|مرحباً)[^\n،,.!؟]*[،,.!]?\s*/, '');
+  return `${greet}\n${rest}`;
+}
+
 /** الرد فيه أرقام (أسعار/أكواد منتجات) تستاهل تتبعت مكتوبة بعد الصوت؟ */
 function hasPricesOrCodes(text) {
   return /[0-9٠-٩]{2,}|ج\.?\s?م|جنيه|[A-Za-z]+[-_]?[0-9]+/.test(String(text));
@@ -643,6 +655,9 @@ async function handleMessage(msg, env) {
   // البوت حس إنه بيتكلم مع تاجر/مورّد ووصل لنقطة محتاجة قرار بشري
   const isSupplierHandoff = reply.includes('[[HANDOFF_SUPPLIER]]');
   if (isSupplierHandoff) reply = reply.replace('[[HANDOFF_SUPPLIER]]', '').trim();
+
+  // أول رسالة في المحادثة → ترحيب بالاسم مضمون (Gemini ساعات بينساه)
+  if (!history.length) reply = withGreeting(reply, politeName(displayName));
 
   // نحدد نوع الرد: تفضيل محفوظ > (تلقائي) يقلّد رسالة العميل
   let pref;

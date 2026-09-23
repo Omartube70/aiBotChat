@@ -75,9 +75,38 @@ export async function sendDocument(to, mediaId, filename, caption) {
   return true;
 }
 
-/** إرسال صورة عبر رابط مباشر (واتساب بيجيبها بنفسه). */
+/** نوع الصورة الحقيقي من أول البايتات (صور إنياد بتتسمّى .png وهي فعليًا WebP أو JPEG). */
+function sniffImage(b) {
+  if (b[0] === 0xff && b[1] === 0xd8) return 'image/jpeg';
+  if (b[0] === 0x89 && b[1] === 0x50 && b[2] === 0x4e && b[3] === 0x47) return 'image/png';
+  if (b[0] === 0x52 && b[1] === 0x49 && b[2] === 0x46 && b[3] === 0x46 && b[8] === 0x57 && b[9] === 0x45)
+    return 'image/webp';
+  return null;
+}
+
+/**
+ * بنزّل الصورة ونرفعها لواتساب بنوعها الحقيقي — لو بعتنا الرابط على طول واتساب بيرفضها
+ * (code 131053 "Image is invalid") لما الامتداد .png والمحتوى WebP/JPEG.
+ * @returns {Promise<string|null>} media id، أو null (ساعتها بنرجع للرابط)
+ */
+async function uploadImageFromLink(link) {
+  try {
+    const r = await fetch(link);
+    if (!r.ok) return null;
+    const buf = await r.arrayBuffer();
+    if (buf.byteLength > 5 * 1024 * 1024) return null;
+    const mime = sniffImage(new Uint8Array(buf, 0, Math.min(12, buf.byteLength)));
+    if (!mime) return null;
+    return await uploadMedia(buf, mime, `image.${mime.split('/')[1]}`);
+  } catch {
+    return null;
+  }
+}
+
+/** إرسال صورة: بنرفعها بنوعها الصح، ولو ده فشل بنبعت الرابط وواتساب يجيبها بنفسه. */
 export async function sendImage(to, link, caption) {
   if (!W.token || !W.phoneNumberId || !link) return false;
+  const mediaId = await uploadImageFromLink(link);
   const res = await fetch(graphUrl(`${W.phoneNumberId}/messages`), {
     method: 'POST',
     headers: {
@@ -89,7 +118,10 @@ export async function sendImage(to, link, caption) {
       recipient_type: 'individual',
       to,
       type: 'image',
-      image: { link, caption: caption ? String(caption).slice(0, 1024) : undefined },
+      image: {
+        ...(mediaId ? { id: mediaId } : { link }),
+        caption: caption ? String(caption).slice(0, 1024) : undefined,
+      },
     }),
   });
   if (!res.ok) {
