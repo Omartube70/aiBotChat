@@ -57,6 +57,7 @@ import {
   getCustomerList,
   getSupplierList,
   getCustomerDir,
+  setCustomerName,
 } from './memory.js';
 import { catalogStats, searchProducts, stockSummary } from './catalog.js';
 import { synthesize } from './tts.js';
@@ -427,6 +428,13 @@ const TITLE_RE = /^(أستاذ|استاذ|أستاذة|استاذة|أ\/|ا\/|ح
  * اسم الترحيب من اسم جوجل/واتساب: "حاج سيد محمود" → "حاج سيد"، "محمد علي" → "أستاذ محمد"،
  * أو null لو مش اسم (إيموجي/أرقام).
  */
+/** اسم حقيقي؟ ("toppower4444" / "📱" / "user_12" → null) */
+function realName(name) {
+  const n = String(name || '').trim();
+  if (!n || n.length > 40 || /[\d@_#.:/]/.test(n)) return null;
+  return /^[\p{L}\s'’-]+$/u.test(n) && /\p{L}{2,}/u.test(n) ? n : null;
+}
+
 function politeName(name) {
   const words = String(name || '').trim().split(/\s+/).filter(Boolean);
   if (!words.length) return null;
@@ -610,7 +618,8 @@ async function handleMessage(msg, env) {
 
   // اسم العميل المسجّل عند صاحب المحل في جوجل (أدق من اسم بروفايل واتساب)
   const contact = await getContactInfo(from, env);
-  const displayName = contact?.name || msg.name || null;
+  const displayName =
+    contact?.name || (await getCustomerDir(env))[from]?.staffName || realName(msg.name) || null;
   const custNum = await customerNum(from, env);
   const who = `${custNum ? `زبون ${custNum} — ` : ''}${displayName ? displayName + ' ' : ''}${from}`;
 
@@ -1251,17 +1260,18 @@ function agoLabel(ms) {
 async function allKnownCustomers(env) {
   const out = new Map();
   const dir = await getCustomerDir(env);
-  for (const [id, c] of Object.entries(dir)) out.set(id, { id, name: c.name, last: c.last, text: c.text });
+  for (const [id, c] of Object.entries(dir))
+    out.set(id, { id, name: c.staffName || realName(c.name), last: c.last, text: c.text, fixed: !!c.staffName });
   for (const c of await getCustomerList(env, 100)) {
     const e = out.get(c.id);
-    if (!e) out.set(c.id, { id: c.id, name: c.name, last: c.at, text: c.text });
-    else if (!e.name && c.name) e.name = c.name;
+    if (!e) out.set(c.id, { id: c.id, name: realName(c.name), last: c.at, text: c.text });
+    else if (!e.name && realName(c.name)) e.name = realName(c.name);
   }
   const contacts = (await env.MEMORY?.get('contacts:map', 'json')) || {};
   for (const [id, v] of Object.entries(contacts)) {
     const name = typeof v === 'string' ? v : v?.name;
     const e = out.get(id);
-    if (e) e.name = name || e.name; // اسم جوجل (المتسجل عندك) أولى من اسم واتساب
+    if (e) e.name = e.fixed ? e.name : name || e.name; // اسم جوجل أولى من اسم واتساب (واللي انت قلته أولى من الاتنين)
     else out.set(id, { id, name, last: 0, text: '' });
   }
   return [...out.values()];
@@ -1371,10 +1381,11 @@ async function handleStaffRequest(agent, t, env) {
     if (!e) byId.set(c.id, { ...c, texts: [c.text] });
     else if (e.texts.length < 2) e.texts.push(c.text);
   }
+  const dirNames = await getCustomerDir(env);
   const customers = [...byId.values()].slice(0, 15).map((c, i) => ({
     i: i + 1,
     id: c.id,
-    name: c.name,
+    name: dirNames[c.id]?.staffName || realName(c.name),
     text: c.texts.join(' / ').slice(0, 200),
     ago: agoLabel(Date.now() - c.at),
   }));
@@ -1418,12 +1429,26 @@ async function handleStaffRequest(agent, t, env) {
           'إنياد مش بيدّيها في رابط المحل العام. لو تبعتلي ملف Excel بالحسابات من إنياد، أعلّم البوت يقراه ويرد عليك بيها على طول.',
       );
       return true;
+    case 'set_name':
     case 'message':
     case 'reengage': {
       let cands = [];
       const id = String(cmd.customer || '').replace(/\D/g, '');
       if (id) cands = (await allKnownCustomers(env)).filter((c) => c.id === id);
       if (!cands.length && cmd.target) cands = await findCustomers(cmd.target, env);
+      // "ده اسمه عبد الرحمن" → نحفظ الاسم عشان الترحيب والبحث بعد كده
+      if (cmd.customer_name && realName(cmd.customer_name) && cands.length === 1) {
+        await setCustomerName(env, cands[0].id, realName(cmd.customer_name));
+        cands[0].name = realName(cmd.customer_name);
+        if (cmd.action === 'set_name') {
+          await sendText(agent, `✅ حفظت إن اللي آخره ${cands[0].id.slice(-4)} اسمه ${cands[0].name}.`);
+          return true;
+        }
+      }
+      if (cmd.action === 'set_name') {
+        await sendText(agent, 'مش متأكد مين الزبون ده 🤔 ابعتلي رقمه أو آخر 4 أرقام منه واسمه.');
+        return true;
+      }
       if (!cands.length) {
         await sendText(agent, `مش لاقي زبون بـ "${cmd.target || 'الاسم ده'}" 🤔 ابعتلي رقمه أو آخر 4 أرقام منه.`);
         return true;

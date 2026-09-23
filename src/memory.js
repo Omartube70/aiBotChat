@@ -185,9 +185,18 @@ async function recordInDirectory(kv, id, name, text) {
   await kv.put(DIR_KEY, JSON.stringify(dir));
 }
 
-/** @returns {Promise<Record<string, {name: ?string, first: number, last: number, text: string}>>} */
+/** @returns {Promise<Record<string, {name: ?string, staffName?: string, first: number, last: number, text: string}>>} */
 export async function getCustomerDir(env) {
   return (await env?.MEMORY?.get(DIR_KEY, 'json')) || {};
+}
+
+/** صاحب المحل قال اسم الزبون ("ده اسمه عبد الرحمن") → بيتحفظ ويتقدّم على اسم بروفايل واتساب. */
+export async function setCustomerName(env, id, name) {
+  const kv = env?.MEMORY;
+  if (!kv || !id || !name) return;
+  const dir = (await kv.get(DIR_KEY, 'json')) || {};
+  dir[id] = { ...(dir[id] || { first: Date.now(), last: 0, text: '' }), staffName: String(name).trim().slice(0, 40) };
+  await kv.put(DIR_KEY, JSON.stringify(dir));
 }
 
 export async function recordSupplier(id, name, text, env) {
