@@ -19,6 +19,7 @@ import {
   debugGemini,
   listModels,
   interpretStaffCommand,
+  staffChat,
 } from './gemini.js';
 import {
   sendText,
@@ -55,6 +56,7 @@ import {
   recordSupplier,
   getCustomerList,
   getSupplierList,
+  getCustomerDir,
 } from './memory.js';
 import { catalogStats, searchProducts, stockSummary } from './catalog.js';
 import { synthesize } from './tts.js';
@@ -513,6 +515,22 @@ async function handleMessage(msg, env) {
     if (msg.document && config.agent.admins.includes(from)) {
       await handleInventoryUpload(from, msg.document, env);
       return;
+    }
+    // فويس من موظف → نفرّغه ونتعامل معاه زي الكتابة بالظبط
+    if (type === 'audio' && msg.audio?.id) {
+      try {
+        const media = await fetchMedia(msg.audio.id);
+        if (!media || media.size > MAX_AUDIO_BYTES) throw new Error('الفويس كبير أو ما اتنزلش');
+        text = await transcribeAudio(media.buffer, media.mimeType || msg.audio.mimeType);
+      } catch (err) {
+        console.error('[staff voice] خطأ:', err.message);
+        noteError(`[staff voice] ${err.message}`);
+      }
+      if (!text) {
+        await sendText(from, 'معلش مسمعتش الفويس كويس 🙏 ابعته تاني أو اكتبهولي.');
+        return;
+      }
+      await sendText(from, `🎙️ فهمت: «${text}»`);
     }
     await handleAgentMessage(from, text, env, msg.contextId);
     return;
@@ -989,8 +1007,12 @@ async function alertSupplierHandoff(from, who, summary, env) {
  * هو بالذات فورًا من غير ما يكتب رقمه ولا يعتمد على آخر تحويل.
  */
 async function handleAgentMessage(agent, text, env, contextId) {
-  const t = (text || '').trim();
-  if (!t) return;
+  // "يا بوت ..." / "بوت، ..." → نشيل النداء ونكمّل بالأمر نفسه
+  const t = (text || '').trim().replace(/^(?:يا\s*)?بوت(?:[\s,،:!.]+|$)/, '').trim();
+  if (!t) {
+    if ((text || '').trim()) await sendText(agent, 'نعم يا فندم 👋 تحب أعملك إيه؟');
+    return;
+  }
 
   // تشغيل/إيقاف البوت فورًا من واتساب — بيتحكم فيه أي رقم موظف
   console.log(`[staff ${agent}] ${t}${contextId ? ' (رد على رسالة)' : ''}`);
@@ -1003,7 +1025,7 @@ async function handleAgentMessage(agent, text, env, contextId) {
   }
 
   // رد على "أبعت؟" من أمر بالكلام العادي (قول لعمر ... / حط سعر عرض فلان ...)
-  if (await handleStaffCmdConfirm(agent, t, env)) return;
+  if (await handleStaffPick(agent, t, env)) return;
 
   // "اعمل عرض" → البوت يسأل المدير نفس الأسئلة الست + السعر ويطلّع العرض (أول حاجة،
   // عشان إجابات زي "12" أو "500000" ما تتفهمش أوامر تانية)
@@ -1207,20 +1229,16 @@ async function handleAgentMessage(agent, text, env, contextId) {
     }
   }
   if (!target) {
-    // أمر بالكلام العادي: "قول لعمر اللي بيسأل على الكالون ..." / "حط سعر عرض الأستاذ فلان ..."
-    if (await handleNaturalStaffCommand(agent, t, env)) return;
-    // سؤال عادي من الموظف (مش موجّه لعميل) → البوت يجاوبه (منقول من البوت القديم)
-    await handleAdminQuestion(agent, t, env);
+    // أي كلام تاني → نفهم الموظف عايز إيه (سعر، فاتورة، عرض، رواتب، رسالة لزبون...) وننفّذ
+    await handleStaffRequest(agent, t, env);
     return;
   }
 
   await relayToCustomer(agent, target, body, env);
 }
 
-/* ---------- أوامر الموظف بالكلام العادي (مع تأكيد قبل التنفيذ) ---------- */
-const staffCmdKey = (a) => `staffcmd:${a}`;
-// كلام شكله أمر لزبون أو تسعير عرض — غيره بيروح لـ handleAdminQuestion من غير نداء زيادة
-const STAFF_CMD_RE = /قول|قله|قلو|ابعت|رد عليه|ردي عليه|رد علي|بلغ|عرفه|عرفيه|فهمه|اديله|اديلو|حط سعر|سعر العرض|سعر عرض|العرض بتاع|عرض الاستاذ|عرض الحاج/;
+/* ---------- الموظف بيكلّم البوت زي ما بيكلّم موظف (كتابة أو فويس، بـ"يا بوت" أو من غيرها) ---------- */
+const staffPickKey = (a) => `staffpick:${a}`;
 
 function agoLabel(ms) {
   const m = Math.round(ms / 60000);
@@ -1229,12 +1247,123 @@ function agoLabel(ms) {
   return h < 24 ? `من ${h} ساعة` : `من ${Math.round(h / 24)} يوم`;
 }
 
-/** @returns اتعامل مع الرسالة ولا لأ */
-async function handleNaturalStaffCommand(agent, t, env) {
-  if (!STAFF_CMD_RE.test(arKey(t))) return false;
-  const kv = env.MEMORY;
+/** كل الزباين اللي نعرفهم: دفتر الزباين + آخر 100 + أسماء جوجل. */
+async function allKnownCustomers(env) {
+  const out = new Map();
+  const dir = await getCustomerDir(env);
+  for (const [id, c] of Object.entries(dir)) out.set(id, { id, name: c.name, last: c.last, text: c.text });
+  for (const c of await getCustomerList(env, 100)) {
+    const e = out.get(c.id);
+    if (!e) out.set(c.id, { id: c.id, name: c.name, last: c.at, text: c.text });
+    else if (!e.name && c.name) e.name = c.name;
+  }
+  const contacts = (await env.MEMORY?.get('contacts:map', 'json')) || {};
+  for (const [id, v] of Object.entries(contacts)) {
+    const name = typeof v === 'string' ? v : v?.name;
+    const e = out.get(id);
+    if (e) e.name = name || e.name; // اسم جوجل (المتسجل عندك) أولى من اسم واتساب
+    else out.set(id, { id, name, last: 0, text: '' });
+  }
+  return [...out.values()];
+}
 
-  // آخر الزباين (من غير تكرار) + آخر رسالتين من كل واحد
+/** يدوّر على زبون بالاسم أو بآخر أرقامه. @returns أقرب النتايج (الأحدث الأول) */
+async function findCustomers(target, env) {
+  const all = await allKnownCustomers(env);
+  const digits = toLatinDigits(String(target || '')).replace(/\D/g, '');
+  let hits = [];
+  if (digits.length >= 3) {
+    const tail = digits.replace(/^0+/, '');
+    hits = all.filter((c) => c.id.endsWith(tail) || c.id.endsWith(digits));
+  }
+  if (!hits.length) {
+    const words = arKey(String(target || '').replace(/[\d٠-٩]/g, ''))
+      .split(' ')
+      .filter((w) => w.length >= 2 && !['الاستاذ', 'استاذ', 'الحاج', 'حاج', 'المهندس', 'مهندس', 'عم'].includes(w));
+    if (words.length) hits = all.filter((c) => c.name && words.every((w) => arKey(c.name).includes(w)));
+  }
+  return hits.sort((a, b) => (b.last || 0) - (a.last || 0)).slice(0, 8);
+}
+
+/** رسالة ودّ تشجّع زبون بقاله كتير يرجع يشتري (من غير أسعار — عشان محدش يتضايق من رقم غلط). */
+function reengageMessage(name) {
+  const who = name && /\p{L}{2,}/u.test(name) ? (/^(حاج|الحاج|م\/|مهندس|أستاذ|استاذ|د\/)/.test(name) ? name : `أستاذ ${name.split(' ')[0]}`) : 'حضرتك';
+  const openers = [
+    `إزيك يا ${who} 👋 أخبار معاليك إيه؟`,
+    `أهلاً يا ${who} 🌹 عامل إيه؟ وحشتنا والله`,
+    `مساء الخير يا ${who} 👋 إن شاء الله تكون بخير`,
+  ];
+  const bodies = [
+    'بقالنا كتير مش شايفينك في القدس! عندنا حاجات جديدة وأسعار حلوة جدًا، وكل حاجة أصلية و*بالضمان*.',
+    'بقالك فترة ما طلّيتش علينا في القدس 🙂 نزلت عندنا بضاعة جديدة بأسعار تجارية، وكلها أصلية و*بالضمان*.',
+  ];
+  const pick = (a) => a[Math.floor(Math.random() * a.length)];
+  return `${pick(openers)}\n${pick(bodies)}\nلو محتاج أي قطعة دلوقتي قولّي اسمها وأنا أقولك سعرها على طول — أنا هنا عشان خدمتك 🙏`;
+}
+
+/** ينفّذ إرسال لزبون واحد اتحدد (رسالة معيّنة أو رسالة ودّ). */
+async function sendStaffMessage(agent, kind, c, message, env) {
+  const text = kind === 'reengage' || !message ? reengageMessage(c.name) : message;
+  const sent = await relayToCustomer(agent, c.id, text, env, c.name, false);
+  if (sent) {
+    // الرسالة تتسجل في محادثة الزبون عشان البوت يكمّل معاه وهو فاهم اللي اتقال
+    const history = await getHistory(c.id, env);
+    await saveHistory(c.id, [...history, { role: 'model', parts: [{ text }] }], env);
+    await sendText(agent, `اللي اتبعت:\n«${text}»`);
+  }
+}
+
+/** الموظف رد على "تقصد مين؟" — "التاني" / "2" / "اللي آخره 3518" / "هاني" / "الغاء". */
+async function handleStaffPick(agent, t, env) {
+  const kv = env.MEMORY;
+  const st = await kv?.get(staffPickKey(agent), 'json');
+  if (!st) return false;
+  const a = arKey(toLatinDigits(t));
+  if (/^(لا|لاء|الغاء|الغي|خلاص|بلاش)$/.test(a)) {
+    await kv.delete(staffPickKey(agent));
+    await sendText(agent, '👍 تمام، مابعتش حاجة.');
+    return true;
+  }
+  const opts = st.options;
+  const ORD = { الاول: 0, اول: 0, الاولاني: 0, التاني: 1, الثاني: 1, تاني: 1, التالت: 2, الثالث: 2, الرابع: 3, الخامس: 4 };
+  let chosen = null;
+  const d = a.replace(/\D/g, '');
+  if (d.length >= 3) chosen = opts.find((o) => o.id.endsWith(d));
+  else if (d.length) chosen = opts[Number(d) - 1];
+  if (!chosen) {
+    const w = Object.keys(ORD).find((k) => ` ${a} `.includes(` ${k} `));
+    if (w) chosen = opts[ORD[w]];
+    else if (/اخر|الاخير|تحت/.test(a)) chosen = opts[opts.length - 1];
+    else if (/فوق/.test(a)) chosen = opts[0];
+  }
+  if (!chosen) {
+    const byName = opts.filter((o) => o.name && a.split(' ').some((x) => x.length >= 2 && arKey(o.name).includes(x)));
+    if (byName.length === 1) chosen = byName[0];
+  }
+  if (!chosen) {
+    await kv.delete(staffPickKey(agent)); // كلام جديد → نسيب الاختيار ونكمّل عادي
+    return false;
+  }
+  await kv.delete(staffPickKey(agent));
+  await sendStaffMessage(agent, st.kind, chosen, st.message, env);
+  return true;
+}
+
+/** "حط سعر عرض فلان" — بيتنفّذ على طول (ملف العرض بيوصل الموظف كمان). */
+async function staffQuotePrice(agent, cmd, env) {
+  const pending = (await env.MEMORY.get(PENDING_QUOTES_KEY, 'json')) || [];
+  const q = pending.find((x) => x.n === Number(cmd.quote));
+  if (!q || !(Number(cmd.price) >= 1000)) return false;
+  await handleQuotePrice(agent, `عرض رقم ${q.n} سعره ${Number(cmd.price)}`, env);
+  return true;
+}
+
+/**
+ * أي رسالة من موظف ما اتفهمتش بالأوامر الثابتة → نفهم هو عايز إيه ونوجّهها:
+ * سعر منتج، فاتورة، عرض تركيب، رواتب، رسالة لزبون، رسالة ودّ، تسعير عرض، حسابات، أو كلام عادي.
+ */
+async function handleStaffRequest(agent, t, env) {
+  const kv = env.MEMORY;
   const log = await getCustomerList(env, 100);
   const byId = new Map();
   for (const c of log) {
@@ -1259,70 +1388,68 @@ async function handleNaturalStaffCommand(agent, t, env) {
     floors: q.data?.floors,
   }));
 
-  let cmd;
+  let cmd = { action: 'chat' };
   try {
     cmd = await interpretStaffCommand(t, customers, quotes);
   } catch (err) {
-    console.error('[staffcmd] خطأ:', err.message);
-    return false;
+    console.error('[staff] فهم الأمر خطأ:', err.message);
   }
+  console.log(`[staff ${agent}] → ${JSON.stringify(cmd).slice(0, 200)}`);
 
-  if (cmd.action === 'message' && cmd.customer && cmd.message) {
-    const c = customers.find((x) => x.id === String(cmd.customer).replace(/\D/g, ''));
-    if (!c) return false;
-    const who = `${c.name ? c.name + ' ' : ''}(آخره ${c.id.slice(-4)}) — كان بيسأل: ${c.text.slice(0, 60)}`;
-    await kv.put(staffCmdKey(agent), JSON.stringify({ action: 'message', customer: c.id, name: c.name, message: cmd.message }), {
-      expirationTtl: 900,
-    });
-    await sendText(agent, `📤 هبعت لـ ${who}:\n\n«${cmd.message}»\n\nأبعت؟ (آه / لا)`);
-    return true;
-  }
-  if (cmd.action === 'quote_price' && cmd.quote && Number(cmd.price) >= 1000) {
-    const q = pending.find((x) => x.n === Number(cmd.quote));
-    if (!q) return false;
-    await kv.put(staffCmdKey(agent), JSON.stringify({ action: 'quote_price', quote: q.n, price: Number(cmd.price) }), {
-      expirationTtl: 900,
-    });
-    await sendText(
-      agent,
-      `🏗️ عرض رقم ${q.n} — ${q.data?.client || q.who}\n${offerSummary(q.data)}\n\n` +
-        `السعر: ${Number(cmd.price).toLocaleString('en')} ${config.store.currency}\nأطلّع العرض وأبعته للعميل؟ (آه / لا)`,
-    );
-    return true;
-  }
-  return false;
-}
-
-/** رد الموظف على التأكيد: "آه" ينفّذ، "لا" يلغي. @returns اتعامل مع الرسالة ولا لأ */
-async function handleStaffCmdConfirm(agent, t, env) {
-  const kv = env.MEMORY;
-  const cmd = await kv?.get(staffCmdKey(agent), 'json');
-  if (!cmd) return false;
-  const a = arKey(t);
-  const yes = /^(اه|ايوه|ايوا|نعم|تمام|ابعت|ابعته|ابعتها|اوك|ok|يلا|موافق|اكيد|طلعه)$/.test(a);
-  const no = /^(لا|لاء|لأ|الغاء|الغي|متبعتش|بلاش)$/.test(a);
-  if (!yes && !no) {
-    await kv.delete(staffCmdKey(agent)); // كلام جديد → الأمر القديم يتلغي ونكمّل عادي
-    return false;
-  }
-  await kv.delete(staffCmdKey(agent));
-  if (no) {
-    await sendText(agent, '👍 تمام، مابعتش حاجة.');
-    return true;
-  }
-  if (cmd.action === 'message') {
-    const sent = await relayToCustomer(agent, cmd.customer, cmd.message, env, cmd.name, false);
-    // الرسالة تتسجل في محادثة الزبون عشان البوت يكمّل معاه وهو فاهم اللي اتقال
-    if (sent) {
-      const history = await getHistory(cmd.customer, env);
-      await saveHistory(cmd.customer, [...history, { role: 'model', parts: [{ text: cmd.message }] }], env);
+  switch (cmd.action) {
+    case 'product_price':
+      if (cmd.product) return lookupProduct(agent, cmd.product, env, { once: true });
+      break;
+    case 'invoice':
+      if (cmd.items) return handleStaffCalc(agent, `احسبلي ${cmd.items}`, env);
+      break;
+    case 'install_offer':
+      return handleGuidedOffer(agent, 'اعمل عرض', env);
+    case 'payroll':
+      if (cmd.command && (await handlePayroll(agent, String(cmd.command), env))) return true;
+      break;
+    case 'quote_price':
+      if (await staffQuotePrice(agent, cmd, env)) return true;
+      break;
+    case 'balance':
+      await sendText(
+        agent,
+        `حسابات ${cmd.kind === 'supplier' ? 'الموردين' : 'العملاء'} (الفلوس اللي لينا وعلينا) لسه مش واصلة للبوت 🙏\n` +
+          'إنياد مش بيدّيها في رابط المحل العام. لو تبعتلي ملف Excel بالحسابات من إنياد، أعلّم البوت يقراه ويرد عليك بيها على طول.',
+      );
+      return true;
+    case 'message':
+    case 'reengage': {
+      let cands = [];
+      const id = String(cmd.customer || '').replace(/\D/g, '');
+      if (id) cands = (await allKnownCustomers(env)).filter((c) => c.id === id);
+      if (!cands.length && cmd.target) cands = await findCustomers(cmd.target, env);
+      if (!cands.length) {
+        await sendText(agent, `مش لاقي زبون بـ "${cmd.target || 'الاسم ده'}" 🤔 ابعتلي رقمه أو آخر 4 أرقام منه.`);
+        return true;
+      }
+      if (cands.length === 1) {
+        await sendStaffMessage(agent, cmd.action, cands[0], cmd.message, env);
+        return true;
+      }
+      await kv.put(
+        staffPickKey(agent),
+        JSON.stringify({ kind: cmd.action, message: cmd.message, options: cands.map((c) => ({ id: c.id, name: c.name })) }),
+        { expirationTtl: 900 },
+      );
+      await sendText(
+        agent,
+        'فيه أكتر من حد، تقصد مين؟\n' +
+          cands
+            .map((c, i) => `${i + 1}. ${c.name || 'بدون اسم'} — آخره ${c.id.slice(-4)}${c.last ? ` (${agoLabel(Date.now() - c.last)})` : ''}`)
+            .join('\n') +
+          '\n\nقولّي الرقم، أو "التاني"، أو "اللي آخره ...".',
+      );
+      return true;
     }
-    return true;
   }
-  if (cmd.action === 'quote_price') {
-    await handleQuotePrice(agent, `عرض رقم ${cmd.quote} سعره ${cmd.price}`, env);
-    return true;
-  }
+  // كلام عادي أو سؤال → رد موظف لمديره (مش بيّاع لزبون)
+  await handleAdminQuestion(agent, t, env);
   return true;
 }
 
@@ -1330,35 +1457,28 @@ async function handleStaffCmdConfirm(agent, t, env) {
 const ADMIN_GREETING = 'أهلاً يا حاج محمد 👋';
 const STAFF_GREETING = 'أهلاً بحضرتك 👋';
 
-/** سؤال حر من موظف → البوت يرد بنفس محرك الأسعار، مع التحية + تذكير إزاي يبعت لعميل. */
+/** كلام عادي من الموظف → البوت يرد زي موظف بيكلّم مديره، مش زي بيّاع بيكلّم زبون. */
 async function handleAdminQuestion(agent, text, env) {
   const greeting = agent === config.agent.manager ? ADMIN_GREETING : STAFF_GREETING;
   if (['/reset', 'ابدأ من جديد', 'ابدا من جديد', 'restart'].includes(text.toLowerCase())) {
     await resetHistory(agent, env);
-    await sendText(agent, `${greeting}\nاتمسحت المحادثة. اسأل عن أي منتج 👍`);
+    await sendText(agent, `${greeting}\nاتمسحت المحادثة. تحت أمرك 👍`);
     return;
   }
   const history = await getHistory(agent, env);
   let reply;
-  let products = [];
   try {
-    const out = await generateReply(text, history);
+    const out = await staffChat(text, history);
     reply = out.reply;
-    products = out.products || [];
     await saveHistory(agent, out.history, env);
   } catch (err) {
     console.error('[gemini] خطأ:', err.message);
     noteError(`[gemini] ${err.message}`);
     reply = 'معلش حصل خطأ مؤقت. جرّب تاني بعد شوية.';
   }
-  // العلامات الداخلية (عرض تركيب/زراير/مورّد) مالهاش معنى مع الموظف
-  reply = reply.replace(/\[\[[A-Z_]+\]\]/g, '').trim() || 'تحت أمرك 🙏';
-  await sendText(
-    agent,
-    `${greeting}\n${reply}\n\n` +
-      '(عشان تبعت لعميل: اكتب رقمه في أول الرسالة، أو اعمل "رد" على رسالته)',
-  );
-  await sendProductImages(agent, reply, products, wantsImage(text));
+  reply = reply || 'تحت أمرك، تحب أعملك إيه؟';
+  // التحية في أول الكلام بس، مش في كل رد
+  await sendText(agent, history.length ? reply : `${greeting}\n${reply}`);
   console.log(`[admin ${agent}] ${text} → ${reply.replace(/\n/g, ' ')}`);
 }
 
@@ -1366,8 +1486,9 @@ async function handleAdminQuestion(agent, text, env) {
 async function relayToCustomer(agent, target, body, env, name, handoff = true) {
   const label = name ? `${name} (${target})` : target;
   // واتساب مش بيسمح نبعت لزبون عدّى 24 ساعة على آخر رسالة منه (الرسالة بتتقبل وبعدين تفشل)
-  const last = (await getCustomerList(env, 100)).find((c) => c.id === target);
-  if (last && Date.now() - last.at > 24 * 3600 * 1000) {
+  const recent = (await getCustomerList(env, 100)).find((c) => c.id === target);
+  const lastAt = recent?.at || (await getCustomerDir(env))[target]?.last || 0;
+  if (!lastAt || Date.now() - lastAt > 24 * 3600 * 1000) {
     await sendText(
       agent,
       `⚠️ مقدرتش أبعت لـ ${label}: عدّى أكتر من 24 ساعة على آخر رسالة منه، وواتساب مش بيسمح للبوت يبعتله.\n` +

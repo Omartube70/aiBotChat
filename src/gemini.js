@@ -593,7 +593,13 @@ export async function interpretStaffCommand(text, customers, quotes) {
     `نادي الزبون "أستاذ <اسمه>" لو اسمه عربي ومعروف، وإلا "حضرتك" — من غير ألقاب تانية (مهندس/دكتور...).\n` +
     `- لو عايز يحط سعر لعرض تركيب: {"action":"quote_price","quote":<رقم العرض من القايمة>,"price":<السعر رقم كامل، "450 ألف" = 450000>}\n` +
     `  حدد العرض من اسم العميل أو العنوان أو التليفون أو أي بيانات قالها.\n` +
-    `- لو مش متأكد مين الزبون/العرض، أو الكلام سؤال عادي مش أمر: {"action":"none"}`;
+    `- لو عايز يعرف سعر منتج (بيع/شراء/تكلفة/"شوفلي سعر"/"بنبيعه بكام"/"جاي علينا بكام"): {"action":"product_price","product":"<اسم المنتج بس>"}\n` +
+    `- لو عايز فاتورة أو يحسب كذا صنف بكميات: {"action":"invoice","items":"<كل صنف في سطر: العدد وبعده اسم المنتج>"}\n` +
+    `- لو عايز يعمل عرض سعر تركيب مصعد جديد: {"action":"install_offer"}\n` +
+    `- لو الكلام عن الرواتب أو الموظفين: {"action":"payroll","command":"<أمر واحد بالظبط من دول: راتب <اسم الموظف> | رواتب الموظفين | الموظفين | موظف جديد | حذف موظف | تعديل رواتب | <اسم الموظف> سلف <المبلغ> | <اسم الموظف> حضور <عدد الأيام> | <اسم الموظف> بياخد <المبلغ>>"}\n` +
+    `- لو بيسأل على حساب/فلوس/مديونية عميل أو مورّد ("محمد عليه كام"، "لينا عند سعيد كام"، "حساب المورد فلان"): {"action":"balance","who":"<الاسم>","kind":"customer أو supplier"}\n` +
+    `- أي كلام تاني (سلام، سؤال عام، دردشة): {"action":"chat"}\n` +
+    `- لو أمر لزبون أو عرض بس مش متأكد مين: {"action":"none"}`;
   const res = await fetch(endpointFor(config.gemini.model), {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -612,6 +618,35 @@ export async function interpretStaffCommand(text, customers, quotes) {
   } catch {
     return { action: 'none' };
   }
+}
+
+const STAFF_PROMPT = `إنت مساعد شاطر وموظف أمين عند صاحب محل "${S.name}" (قطع غيار مصاعد) وشركة "توب باور" (تركيب وصيانة مصاعد).
+اللي بيكلمك دلوقتي صاحب المحل أو واحد من موظفينه — مش زبون.
+- **ممنوع تعامله كزبون**: متسألوش "محتاج قطع غيار إيه" ولا تعرض عليه بضاعة ولا تقوله "أهلاً بيك في المحل".
+- رد زي موظف بيكلم مديره: قصير، عملي، بالعامية المصرية، ومحترم ("تحت أمرك"، "حاضر"، "تمام يا فندم").
+- لو بيسلّم أو بيدردش: رد بلطف واسأله "تحب أعملك إيه؟".
+- قوله إنك تقدر: تجيب سعر البيع والشراء لأي منتج، تعمل فاتورة، تعمل عرض سعر تركيب، تحسب الرواتب، تبعت رسالة لزبون، تحط سعر لعرض عميل — لو سأل تقدر تعمل إيه.
+- ممنوع تخترع أرقام أو أسعار أو بيانات.`;
+
+/** رد "موظف" لصاحب المحل (مش رد بيّاع لزبون). */
+export async function staffChat(text, history = []) {
+  const res = await fetch(endpointFor(config.gemini.model), {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    signal: AbortSignal.timeout(15000),
+    body: JSON.stringify({
+      systemInstruction: { parts: [{ text: STAFF_PROMPT }] },
+      contents: [...history, { role: 'user', parts: [{ text }] }],
+      generationConfig: { temperature: 0.5, maxOutputTokens: 600, ...fast() },
+    }),
+  });
+  if (!res.ok) throw new Error(`staffChat ${res.status}`);
+  const data = await res.json();
+  const reply = (data.candidates?.[0]?.content?.parts || []).map((p) => p.text).filter(Boolean).join('\n').trim();
+  return {
+    reply,
+    history: [...history, { role: 'user', parts: [{ text }] }, { role: 'model', parts: [{ text: reply }] }].slice(-12),
+  };
 }
 
 /** يحوّل ArrayBuffer لسلسلة base64 (على دفعات عشان ما نكسّرش الـ stack). */
