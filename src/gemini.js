@@ -402,14 +402,33 @@ function base64FromArrayBuffer(buf) {
 }
 
 /**
+ * نداء صوت/صورة: بيجرّب موديل الصوت (flash) مرتين، ولو مزدحم (503) أو الحد خلص (429)
+ * بيرجع للموديل العادي (flash-lite) — flash-lite بيفهم الصوت والصور كويس برضو.
+ */
+async function postMedia(body) {
+  const models = [...new Set([config.gemini.audioModel, config.gemini.model].filter(Boolean))];
+  let res;
+  for (const model of models) {
+    const url = `${config.gemini.baseUrl}/models/${model}:generateContent?key=${config.gemini.apiKey}`;
+    const post = () => fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body });
+    res = await post();
+    if (!res.ok && [500, 503].includes(res.status)) {
+      await sleep(900);
+      res = await post();
+    }
+    if (res.ok || ![429, 500, 503].includes(res.status)) return res;
+    console.warn(`[gemini] ${model} ${res.status} — بجرّب الموديل التاني`);
+  }
+  return res;
+}
+
+/**
  * تفريغ رسالة صوتية لنص باستخدام Gemini (نفس المفتاح).
  * @param {ArrayBuffer} buffer الملف الصوتي
  * @param {string} mimeType نوعه (audio/ogg مثلاً)
  * @returns {Promise<string>} النص المفرّغ (فاضي لو فشل التعرّف)
  */
 export async function transcribeAudio(buffer, mimeType = 'audio/ogg') {
-  const model = config.gemini.audioModel || config.gemini.model;
-  const url = `${config.gemini.baseUrl}/models/${model}:generateContent?key=${config.gemini.apiKey}`;
 
   const body = JSON.stringify({
     contents: [
@@ -431,12 +450,7 @@ export async function transcribeAudio(buffer, mimeType = 'audio/ogg') {
     generationConfig: { temperature: 0, maxOutputTokens: 400 },
   });
 
-  // محاولة تانية سريعة لو السيرفر مزدحم مؤقتًا (503) — بيحصل بين حين وحين
-  let res = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body });
-  if (!res.ok && [500, 503].includes(res.status)) {
-    await sleep(900);
-    res = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body });
-  }
+  const res = await postMedia(body);
   if (!res.ok) {
     const t = await res.text().catch(() => '');
     throw new Error(`Gemini STT ${res.status}: ${t.slice(0, 200)}`);
@@ -456,8 +470,6 @@ export async function transcribeAudio(buffer, mimeType = 'audio/ogg') {
  * @returns {Promise<string>} وصف قصير، أو نص فاضي لو مقدرش يتعرّف عليها
  */
 export async function identifyImage(buffer, mimeType = 'image/jpeg') {
-  const model = config.gemini.audioModel || config.gemini.model;
-  const url = `${config.gemini.baseUrl}/models/${model}:generateContent?key=${config.gemini.apiKey}`;
 
   const body = JSON.stringify({
     contents: [
@@ -485,11 +497,7 @@ export async function identifyImage(buffer, mimeType = 'image/jpeg') {
     generationConfig: { temperature: 0, maxOutputTokens: 60 },
   });
 
-  let res = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body });
-  if (!res.ok && [500, 503].includes(res.status)) {
-    await sleep(900);
-    res = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body });
-  }
+  const res = await postMedia(body);
   if (!res.ok) {
     const t = await res.text().catch(() => '');
     throw new Error(`Gemini vision ${res.status}: ${t.slice(0, 200)}`);
