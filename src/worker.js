@@ -1358,6 +1358,24 @@ function reengageMessage(name) {
 /** ينفّذ إرسال لزبون واحد اتحدد (رسالة معيّنة أو رسالة ودّ). */
 async function sendStaffMessage(agent, kind, c, message, env) {
   const text = kind === 'reengage' || !message ? reengageMessage(c.name) : message;
+
+  // زبون ماكلّمناش آخر 24 ساعة: واتساب مش هيسمح للبوت يبعتله ببلاش —
+  // فبنجهّز للموظف لينك يفتح المحادثة من تليفونه والرسالة مكتوبة جاهزة (ببلاش).
+  const recent = (await getCustomerList(env, 100)).find((x) => x.id === c.id);
+  const lastAt = recent?.at || (await getCustomerDir(env))[c.id]?.last || 0;
+  if (!lastAt || Date.now() - lastAt > 24 * 3600 * 1000) {
+    const shop = config.store.whatsapp.replace(/\D/g, '');
+    const full = `${text}\n\nولو حابب تكلّم المحل على طول وتعرف أي سعر: https://wa.me/${shop}`;
+    await sendText(
+      agent,
+      `📲 ${c.name || 'الزبون'} (آخره ${c.id.slice(-4)}) ماكلّمناش ${lastAt ? agoLabel(Date.now() - lastAt) : 'قبل كده'} — ` +
+        'واتساب مش هيوصّلها من البوت ببلاش.\n' +
+        `دوس اللينك ده، هتتفتح المحادثة من تليفونك والرسالة مكتوبة جاهزة، ابعتها وخلاص 👇\n` +
+        `https://wa.me/${c.id}?text=${encodeURIComponent(full)}`,
+    );
+    return;
+  }
+
   const sent = await relayToCustomer(agent, c.id, text, env, c.name, false);
   if (sent) {
     // الرسالة تتسجل في محادثة الزبون عشان البوت يكمّل معاه وهو فاهم اللي اتقال
@@ -1487,6 +1505,24 @@ async function handleStaffRequest(agent, t, env) {
     case 'set_name':
     case 'message':
     case 'reengage': {
+      // "كلّم هاني وإسلام وعمر" → كل واحد لوحده، وفي الآخر ملخص باللي مالقيتهوش أو فيه منه أكتر من واحد
+      const targets = Array.isArray(cmd.targets) ? cmd.targets.filter(Boolean) : [];
+      if (cmd.action === 'reengage' && targets.length > 1) {
+        const notes = [];
+        for (const target of targets.slice(0, 10)) {
+          const found = await findCustomers(target, env);
+          if (found.length === 1) await sendStaffMessage(agent, 'reengage', found[0], null, env);
+          else if (!found.length) notes.push(`❓ مش لاقي "${target}"`);
+          else
+            notes.push(
+              `🤔 "${target}" فيه منه ${found.length}: ` +
+                found.slice(0, 4).map((c) => `${c.name || 'بدون اسم'} (آخره ${c.id.slice(-4)})`).join('، '),
+            );
+        }
+        if (notes.length) await sendText(agent, `${notes.join('\n')}\n\nقولّي الاسم كامل أو آخر 4 أرقام وأنا أبعتله.`);
+        return true;
+      }
+      if (!cmd.target && targets.length === 1) cmd.target = targets[0];
       let cands = [];
       const id = String(cmd.customer || '').replace(/\D/g, '');
       if (id) cands = (await allKnownCustomers(env)).filter((c) => c.id === id);
