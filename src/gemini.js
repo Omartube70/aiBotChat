@@ -423,8 +423,18 @@ function pricesGrounded(reply, products, userTexts = []) {
 function dropWarrantySentences(reply) {
   const lines = reply.split('\n').map((line) => {
     if (!/ضمان/.test(line)) return line;
-    const parts = line.split(/(?<=[.!؟?])\s+/);
-    return parts.filter((p) => !/ضمان/.test(p)).join(' ');
+    // بنقسم عند نهاية الجملة أو الفاصلة — عشان "الكالون بـ 800، وكل حاجتنا بالضمان" يفضل فيها السعر
+    const parts = line.split(/(?<=[.!؟?،,])\s+/);
+    return parts
+      .map((p) => {
+        if (!/ضمان/.test(p)) return p;
+        // جزء فيه رقم (سعر) عمره ما يتشال — بنقص منه كلام الضمان بس ("بـ 375 وكلها بالضمان" → "بـ 375")
+        if (/[\d٠-٩]/.test(p)) return p.replace(/\s*و?\s*(?:طبعا|طبعاً)?\s*(?:كل|كلها|كله)[^،,.!؟\d]*ضمان[^،,.!؟\d]*/, '');
+        return '';
+      })
+      .filter(Boolean)
+      .join(' ')
+      .replace(/[،,]\s*$/, '');
   });
   const out = lines
     .join('\n')
