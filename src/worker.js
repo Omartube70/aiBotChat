@@ -491,11 +491,15 @@ function detectReplyModeChange(text) {
   if (has('رد عادي', 'زي ما تحب', 'الغاء الصوت', 'رجعنا عادي')) return 'auto';
   if (has('بلاش صوت', 'مش عايز صوت', 'من غير صوت', 'بطل صوت', 'مفيش صوت')) return 'text';
 
+  // "مش شايف" / "مش بعرف اقرا" → صوت (الزبون محتاج يسمع)
+  if (has('مش شايف', 'مش شايفه', 'مش بشوف', 'مش بعرف اقرا', 'مش عارف اقرا', 'مبعرفش اقرا', 'مش بقرا', 'نظري ضعيف')) return 'voice';
+
   const askReply = has(
-    'رد', 'ردود', 'ردي', 'جاوب', 'كلمني', 'ابعت', 'ابعتلي',
+    'رد', 'ردود', 'ردي', 'جاوب', 'كلمني', 'ابعت', 'ابعتلي', 'ابعتهولي', 'ابعتها',
+    'قول', 'قولي', 'قوللي', 'قولهولي', 'قولها', 'قوله', 'سمعني', 'اسمعني', 'سمعهولي', 'اتكلم',
     'عايز', 'عاوز', 'محتاج', 'ممكن', 'please', 'reply',
   );
-  const voiceWord = has('صوت', 'فويس', 'voice', 'audio');
+  const voiceWord = has('صوت', 'صوتي', 'صوتيه', 'صوتية', 'فويس', 'ريكورد', 'تسجيل صوت', 'voice', 'audio');
   const textWord = has(
     'نص', 'كتابه', 'كتابة', 'مكتوب', 'اكتبلي', 'اكتب', 'رسايل', 'text', 'message',
   );
@@ -703,13 +707,11 @@ async function handleMessage(msg, env) {
   const modeChange = detectReplyModeChange(text);
   if (modeChange) {
     await setPref(from, env, modeChange === 'auto' ? null : modeChange);
-    if (modeChange === 'voice')
-      await sendText(
-        from,
-        config.tts.enabled ? 'تمام، هرد عليك بالصوت من دلوقتي 🎙️' : 'ابعتلي فويس براحتك وأنا هفهمه، بس هرد عليك كتابة 🙏',
-      );
+    // طلب صوت: مفيش "هبعتلك صوت" — الرد نفسه بيوصله فويس (بعد الكتابة) من غير وعود
+    if (modeChange === 'voice' && !config.tts.enabled)
+      await sendText(from, 'ابعتلي فويس براحتك وأنا هفهمه، بس هرد عليك كتابة 🙏');
     else if (modeChange === 'text') await sendText(from, 'تمام، هرد عليك بالكتابة من دلوقتي ✍️');
-    else await sendText(from, 'تمام، هرد بنفس نوع رسالتك 👍');
+    else if (modeChange === 'auto') await sendText(from, 'تمام، هرد بنفس نوع رسالتك 👍');
   }
 
   console.log(`[msg] ${from}: ${text}`);
@@ -785,9 +787,16 @@ async function handleMessage(msg, env) {
 
   // الفويس بيتقري بالعامية من غير الأسعار الطويلة — والأسعار موجودة مكتوبة فوق
   let deliveredAsVoice = false;
-  if (wantVoice && reply.length <= config.tts.maxChars) {
+  if (wantVoice) {
     try {
-      const audio = await synthesize(reply);
+      // رد طويل (قايمة أسعار) → الفويس بيقول أوله بس (الباقي مكتوب فوق) — أخف وأسرع
+      const max = config.tts.maxChars;
+      const cut = reply.lastIndexOf('\n', max);
+      const spoken =
+        reply.length <= max
+          ? reply
+          : `${reply.slice(0, cut > max / 2 ? cut : max)}\nوباقي التفاصيل مكتوبة لحضرتك فوق 👆`;
+      const audio = await synthesize(spoken);
       if (audio) {
         const fname = audio.mimeType === 'audio/ogg' ? 'reply.ogg' : 'reply.mp3';
         const mediaId = await uploadMedia(audio.buffer, audio.mimeType, fname);

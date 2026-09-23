@@ -115,8 +115,28 @@ function decodePcm(bytes, mimeType = '', sampleRate) {
   return { samples, sampleRate: rate };
 }
 
-function encodeMp3(samples, sampleRate) {
-  const enc = new Mp3Encoder(1, sampleRate, 48);
+/**
+ * 24kHz → 16kHz (كفاية جدًا للكلام) — عينات أقل بالتلت = تحويل MP3 أخف على Cloudflare المجاني.
+ * تحويل خطي بسيط (interpolation) من غير مكتبات.
+ */
+function downsample(samples, from, to) {
+  if (from <= to) return { samples, rate: from };
+  const ratio = from / to;
+  const out = new Int16Array(Math.floor(samples.length / ratio));
+  for (let i = 0; i < out.length; i++) {
+    const x = i * ratio;
+    const j = Math.floor(x);
+    const f = x - j;
+    const a = samples[j];
+    const b = samples[j + 1] ?? a;
+    out[i] = a + (b - a) * f;
+  }
+  return { samples: out, rate: to };
+}
+
+function encodeMp3(pcmSamples, pcmRate) {
+  const { samples, rate: sampleRate } = downsample(pcmSamples, pcmRate, 16000);
+  const enc = new Mp3Encoder(1, sampleRate, 32);
   const chunks = [];
   const BLOCK = 1152;
   for (let i = 0; i < samples.length; i += BLOCK) {
