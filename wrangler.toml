@@ -2,6 +2,8 @@ name = "quds-bot"
 main = "src/worker.js"
 compatibility_date = "2024-11-01"
 workers_dev = true
+# حساب Cloudflare بتاع omartubefaheen (مش سرّي) — عشان النشر التلقائي من GitHub يعرف ينشر فين
+account_id = "e219b594c38854efc8100c2e30324a58"
 
 # ذاكرة المحادثة (30 دقيقة TTL). أنشئ الـ namespace بالأمر:
 #   npx wrangler kv namespace create MEMORY

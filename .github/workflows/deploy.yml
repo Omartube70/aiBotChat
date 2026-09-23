@@ -1,0 +1,29 @@
+# نشر تلقائي: أي تعديل يتحفظ على main (من الكمبيوتر أو التليفون) بيتنشر على Cloudflare لوحده.
+# محتاج secret واحد في GitHub: CLOUDFLARE_API_TOKEN
+# (Settings → Secrets and variables → Actions → New repository secret)
+name: Deploy bot
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch: {}
+
+concurrency:
+  group: deploy
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      # فحص سريع إن الكود مفيهوش أخطاء كتابة قبل ما يتنشر
+      - run: for f in src/*.js; do node --check "$f"; done
+      - run: npx wrangler deploy
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
