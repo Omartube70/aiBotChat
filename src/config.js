@@ -70,7 +70,8 @@ export const config = {
     management: ['201000363323', '201003044660'], // AGENT_MANAGEMENT — "عايز حد من الإدارة" (بيوصل الاتنين)
     ccNumbers: ['201000363323', '201003044660', '201050699420'], // CC_NUMBERS — بتوصلهم نسخة من كل رسالة عميل
     handoffTtl: 7200, // ثواني — بعدها البوت يرجع تلقائيًا لو الموظف نسي يقفل
-    admins: ['201000363323', '201003044660'], // AGENT_ADMINS — صلاحيات المدير (المخزون وبيانات المحل)
+    admins: ['201000363323', '201003044660', '201050699420'], // AGENT_ADMINS — أسعار البيع والشراء والمخزون (أرقام الموظفين التلاتة)
+    payroll: ['201000363323'], // AGENT_PAYROLL — الرواتب من الرقم ده بس
   },
 
   catalogTtlMs: 300 * 1000,
@@ -140,6 +141,10 @@ export function applyEnv(env = {}) {
         .filter(Boolean),
     ),
   ];
+  config.agent.payroll = g('AGENT_PAYROLL', config.agent.payroll.join(','))
+    .split(',')
+    .map((s) => s.replace(/D/g, ''))
+    .filter(Boolean);
   const httl = Number(g('HANDOFF_TTL_SECONDS', String(config.agent.handoffTtl)));
   config.agent.handoffTtl = Number.isFinite(httl) && httl > 0 ? httl : 7200;
 

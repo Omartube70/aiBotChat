@@ -1,5 +1,5 @@
 /**
- * رواتب الموظفين الأسبوعية من واتساب (للإدارة فقط) — نفس منطق شيت رواتب.xlsx:
+ * رواتب الموظفين الأسبوعية من واتساب (من رقم AGENT_PAYROLL بس) — نفس منطق شيت رواتب.xlsx:
  *   قيمة اليوم = قيمة القبض ÷ 12
  *   الراتب النهائي = قيمة اليوم × الحضور − السلف
  * البيانات بتتخزّن في KV (payroll:data) ومش بتتربط بأي حاجة تانية.
@@ -175,7 +175,7 @@ async function payrollTopicMenu(agent, s, kv) {
   const words = s.split(' ');
   if (words.length > 6 || /^(?:زبون|ابعت|عرض|عرض رقم)/.test(s)) return false;
   if (!words.some((w) => TOPIC_WORDS.includes(w))) return false;
-  if (!config.agent.management.includes(agent)) return false;
+  if (!config.agent.payroll.includes(agent)) return false;
   const menu = [
     '💼 موضوع الرواتب — تحب إيه؟',
     '',
@@ -204,7 +204,7 @@ export async function handlePayroll(agent, text, env) {
   // "اضافة موظف سعيد 5000" / "حذف موظف سعيد"
   const addM = s.match(/^(?:اضافه|ضيف|اضف) موظف ([^\d]+?)\s*(\d+(?:\.\d+)?)?$/);
   const delM = s.match(/^(?:حذف|امسح|شيل) موظف (.+)$/);
-  if ((addM || delM) && kv0 && config.agent.management.includes(agent)) {
+  if ((addM || delM) && kv0 && config.agent.payroll.includes(agent)) {
     const d = (await kv0.get(KEY, 'json')) || {};
     if (addM) {
       const name = addM[1].trim();
@@ -234,7 +234,7 @@ export async function handlePayroll(agent, text, env) {
   // ---- حوار قبض الراتب: "راتب محمود" → سلف كام؟ → حضور كام؟ → الراتب النهائي ----
   const flowKey = `payroll:flow:${agent}`;
   const bulkKey = `payroll:bulk:${agent}`;
-  if (kv0 && config.agent.management.includes(agent)) {
+  if (kv0 && config.agent.payroll.includes(agent)) {
     // "رواتب الموظفين" → كل الرواتب مرة واحدة (اللي متذكرش يتحسب 12 يوم من غير سلف)
     const words = s.split(' ');
     const TRIG_WORDS = ['رواتب', 'الرواتب', 'مرتبات', 'المرتبات', 'كل', 'الكل', 'كلهم', 'الموظفين', 'موظفين', 'الجميع', 'حساب', 'احسب', 'احسبلي', 'ال', 'لكل', 'بتاع', 'بتوع'];
@@ -361,7 +361,7 @@ export async function handlePayroll(agent, text, env) {
   }
 
   const editKey = `payroll:edit:${agent}`;
-  if (kv0 && config.agent.management.includes(agent)) {
+  if (kv0 && config.agent.payroll.includes(agent)) {
     if (['تعديل رواتب', 'تعديل الرواتب', 'تعديل القبض', 'تغيير رواتب', 'تغيير الرواتب', 'تغير رواتب', 'تغير الرواتب'].includes(s)) {
       const d = (await kv0.get(KEY, 'json')) || {};
       await kv0.put(editKey, '1', { expirationTtl: 600 });
@@ -409,7 +409,7 @@ export async function handlePayroll(agent, text, env) {
   const isSet = num && has('سلف', 'حضور', 'حضر', 'ياخد', 'بياخد', 'بتاخد', 'ياخذ', 'قبض', 'قبضه', 'قبضها', 'شهريه');
   if (!isAll && !isReset && !isSet && !wantsShow) return payrollTopicMenu(agent, s, kv0);
 
-  if (!config.agent.management.includes(agent)) {
+  if (!config.agent.payroll.includes(agent)) {
     await sendText(agent, 'ده أمر خاص بالإدارة فقط.');
     return true;
   }
