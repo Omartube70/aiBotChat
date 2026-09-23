@@ -570,7 +570,7 @@ export async function extractDiscount(text) {
  *   "حط سعر عرض الأستاذ محمد علي 450 ألف" / "العرض بتاع فيصل 5 أدوار سعره 600000"
  * @param {Array<{i:number,id:string,name:?string,text:string,ago:string}>} customers آخر الزباين
  * @param {Array<{n:number,client:string,phone:string,address:string,machine:string,floors:string}>} quotes عروض مستنية سعر
- * @returns {Promise<{action:'message'|'quote_price'|'none', customer?:string, message?:string, quote?:number, price?:number}>}
+ * @returns {Promise<{action:'message'|'reengage'|'quote_price'|'none', customer?:string, target?:string, message?:string, quote?:number, price?:number}>}
  */
 export async function interpretStaffCommand(text, customers, quotes) {
   const custLines = customers
@@ -584,7 +584,10 @@ export async function interpretStaffCommand(text, customers, quotes) {
     `آخر الزباين اللي كلّموا البوت:\n${custLines || '(مفيش)'}\n\n` +
     `عروض تركيب مستنية سعر:\n${quoteLines || '(مفيش)'}\n\n` +
     `حدد هو عايز إيه ورجّع JSON object بس:\n` +
-    `- لو عايز تبعت كلام لزبون (زي "قوله"، "رد عليه"، "ابعتله"، "بلّغه"): {"action":"message","customer":"<الرقم الكامل من القايمة>","message":"<الرسالة للزبون>"}\n` +
+    `- لو عايز تبعت كلام معيّن لزبون (زي "قوله"، "رد عليه"، "ابعتله"، "بلّغه"): {"action":"message","customer":"<الرقم الكامل من القايمة>","target":"<الاسم أو الأرقام زي ما هو قالها>","message":"<الرسالة للزبون>"}\n` +
+    `  لو الزبون في القايمة فوق حط رقمه في customer، ولو مش فيها سيب customer فاضي وحط الاسم/الأرقام اللي قالها في target.\n` +
+    `- لو عايز يبعت لزبون رسالة حلوة يشجعه يشتري تاني (زي "بقاله كتير ما جاش"، "ابعتله رسالة حلوة"، "فكّره بينا"، "كلمه يرجع"): ` +
+    `{"action":"reengage","customer":"<الرقم من القايمة لو موجود>","target":"<الاسم أو الأرقام زي ما هو قالها>"}\n` +
     `  حدد الزبون من الاسم أو آخر أرقام التليفون أو الحاجة اللي كان بيسأل عليها. الرسالة تتكتب للزبون بالعامية المصرية بأسلوب محترم وودود ` +
     `بلسان المحل، وفيها كل المعلومات اللي صاحب المحل قالها بالظبط (الأسعار والأرقام زي ما هي) من غير أي معلومة من عندك. ` +
     `نادي الزبون "أستاذ <اسمه>" لو اسمه عربي ومعروف، وإلا "حضرتك" — من غير ألقاب تانية (مهندس/دكتور...).\n` +

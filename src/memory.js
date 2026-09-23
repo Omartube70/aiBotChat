@@ -160,6 +160,34 @@ async function readLog(kv, key, limit) {
 
 export async function recordCustomer(id, name, text, env) {
   await pushLog(env?.MEMORY, CUSTOMERS_KEY, { id, name: name || null, text: (text || '').slice(0, 150), at: Date.now() });
+  await recordInDirectory(env?.MEMORY, id, name, text);
+}
+
+/* ---------- دفتر الزباين الدائم (مش بس آخر 100) — عشان "ابعت لهاني مبروك، بقاله كتير" ---------- */
+const DIR_KEY = 'customers:dir';
+const DIR_CAP = 5000;
+
+async function recordInDirectory(kv, id, name, text) {
+  if (!kv || !id || String(id).startsWith('fb:')) return;
+  const dir = (await kv.get(DIR_KEY, 'json')) || {};
+  const old = dir[id] || {};
+  dir[id] = {
+    name: name || old.name || null,
+    first: old.first || Date.now(),
+    last: Date.now(),
+    text: (text || '').slice(0, 100) || old.text || '',
+  };
+  const ids = Object.keys(dir);
+  if (ids.length > DIR_CAP) {
+    ids.sort((a, b) => dir[a].last - dir[b].last);
+    for (const k of ids.slice(0, ids.length - DIR_CAP)) delete dir[k];
+  }
+  await kv.put(DIR_KEY, JSON.stringify(dir));
+}
+
+/** @returns {Promise<Record<string, {name: ?string, first: number, last: number, text: string}>>} */
+export async function getCustomerDir(env) {
+  return (await env?.MEMORY?.get(DIR_KEY, 'json')) || {};
 }
 
 export async function recordSupplier(id, name, text, env) {

@@ -194,6 +194,16 @@ export default {
       }
     }
 
+    // واتساب بيبعت الرسايل على أنهي عنوان؟ (قراءة بس)
+    if (method === 'GET' && pathname === '/debug/webhook' && env.ENABLE_DEBUG_CHAT === '1') {
+      const W = config.whatsapp;
+      const r = await fetch(
+        `https://graph.facebook.com/${W.graphVersion}/${W.phoneNumberId}?fields=display_phone_number,webhook_configuration`,
+        { headers: { Authorization: `Bearer ${W.token}` } },
+      );
+      return Response.json(await r.json());
+    }
+
     // سجل التشخيص: رسايل وصلت + مشاكل إرسال واتساب (من الموبايل)
     if (method === 'GET' && pathname === '/debug/log' && env.ENABLE_DEBUG_CHAT === '1') {
       return diagPage(env);
