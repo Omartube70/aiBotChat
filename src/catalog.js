@@ -144,23 +144,51 @@ export async function apiSearch(keyword) {
   return fetchAllPages(keyword, 6);
 }
 
-// نتايج البحث بالكلمة بتتحفظ لنفس مدة الكاش (منقول من البوت القديم) —
-// نفس السؤال ("كالون"، "طرمبة") بيتكرر كتير فبيرد على طول من غير نداء API.
-const searchCache = new Map();
-function cachedApiSearch(term) {
-  const key = normalizeAr(term);
-  const hit = searchCache.get(key);
-  if (hit && Date.now() - hit.at < config.catalogTtlMs) return hit.promise;
-  const promise = apiSearch(term);
-  promise.catch(() => searchCache.delete(key));
-  if (searchCache.size > 500) searchCache.clear();
-  searchCache.set(key, { at: Date.now(), promise });
-  return promise;
-}
-
 /* ----------------------------- الكاش ----------------------------- */
 
 let cache = { products: [], fetchedAt: 0, loading: null };
+
+// نسخة من الكتالوج كله محفوظة في التخزين (بيحدّثها الـ cron كل نص ساعة) — عشان رسالة الزبون
+// ما تعملش 9-80 نداء لإنياد (Cloudflare المجاني بيوقف الرسالة بعد 50 نداء).
+const SNAP_KEY = 'catalog:snapshot';
+const SNAP_MAX_AGE = 90 * 60 * 1000;
+let snapKV = null;
+export function setCatalogKV(kv) {
+  snapKV = kv || null;
+}
+
+/** بنحسب الأشكال المطبّعة مرة واحدة لكل منتج (أسرع بكتير من كل بحث). */
+function prepare(products) {
+  for (const p of products) {
+    p._n = normalizeAr(p.name);
+    p._w = p._n.split(' ');
+    p._h = normalizeAr(`${p.name} ${p.description} ${p.category}`);
+    p._f = p._w.map(wordForms);
+  }
+  return products;
+}
+
+async function loadProducts() {
+  if (snapKV) {
+    try {
+      const snap = await snapKV.get(SNAP_KEY, 'json');
+      if (snap?.products?.length && Date.now() - snap.at < SNAP_MAX_AGE) return snap.products;
+    } catch (err) {
+      console.warn('[catalog] قراءة النسخة المحفوظة فشلت:', err.message);
+    }
+  }
+  const products = await fetchAllProducts();
+  snapKV?.put(SNAP_KEY, JSON.stringify({ at: Date.now(), products })).catch(() => {});
+  return products;
+}
+
+/** الـ cron: يجيب الكتالوج من إنياد ويحفظه (الرسايل بعد كده بتقرا النسخة دي). */
+export async function refreshCatalogSnapshot() {
+  const products = await fetchAllProducts();
+  await snapKV?.put(SNAP_KEY, JSON.stringify({ at: Date.now(), products }));
+  cache = { products: prepare(products), fetchedAt: Date.now(), loading: null };
+  return products.length;
+}
 
 async function ensureCache() {
   const fresh = Date.now() - cache.fetchedAt < config.catalogTtlMs;
@@ -169,7 +197,7 @@ async function ensureCache() {
 
   cache.loading = (async () => {
     try {
-      const products = await fetchAllProducts();
+      const products = prepare(await loadProducts());
       cache = { products, fetchedAt: Date.now(), loading: null };
       console.log(`[catalog] تم تحميل ${products.length} منتج في الكاش`);
       return products;
@@ -271,12 +299,31 @@ function stem(w) {
   return s;
 }
 
-/** نفس الكلمة؟ (بالجذر من الناحيتين — "ماكين" = "ماكينه"، "الوايرات" = "واير") */
-function sameWord(a, b) {
-  const sa = stem(a);
-  const sb = stem(b);
-  if (sa.length < 3 || sb.length < 3) return false;
-  return sa === sb || sa === loose(b) || loose(a) === sb;
+/** أشكال الكلمة المحسوبة مرة واحدة: الأصل، المرن، الجذر، الهيكل. */
+function wordForms(w) {
+  return { w, l: loose(w), s: stem(w), k: skeleton(w) };
+}
+
+/** نفس الكلمة؟ بالجذر من الناحيتين ("ماكين" = "ماكينه"، "الوايرات" = "واير") — على أشكال محسوبة قبل كده. */
+function sameForms(a, b) {
+  if (a.s.length < 3 || b.s.length < 3) return false;
+  return a.s === b.s || a.s === b.l || a.l === b.s;
+}
+
+/** درجة التطابق التقريبي (0 / 2 تقريبي / 3 شبه مطابق) مع أقرب كلمة في الاسم. */
+function fuzzyForms(forms, tf) {
+  if (tf.w.length < 3) return 0;
+  let best = 0;
+  for (const f of forms) {
+    if (f.w.length < 3) continue;
+    if (f.l === tf.l || (tf.k.length >= 2 && f.k === tf.k)) return 3;
+    if (Math.abs(f.l.length - tf.l.length) > 2) continue;
+    const d = editDistance(f.l, tf.l);
+    const len = Math.min(f.l.length, tf.l.length);
+    if (d <= 1 && len >= 4) best = Math.max(best, len >= 6 ? 3 : 2);
+    else if (d === 2 && len >= 7) best = Math.max(best, 2);
+  }
+  return best;
 }
 
 /** هيكل الكلمة من غير حروف المد والهاء الأخيرة: ماكنه=ماكينه، كلون=كالون، حبال=حبل، زراير=زرار. */
@@ -285,59 +332,39 @@ function skeleton(w) {
 }
 
 /**
- * درجة التطابق التقريبي لكلمة t مع أقرب كلمة في الاسم.
- * @returns {number} 0 = لا يوجد، 2 = تقريبي، 3 = شبه مطابق (نفس الكلمة بكتابة مختلفة)
+ * @param {Array<{raw: string, t: string, f: object}>} terms كلمات البحث (محسوبة مرة واحدة لكل بحث)
+ * @returns {{s: number, exact: boolean}} exact = كلمة واحدة على الأقل اتطابقت حرفيًا (مش تقريبي)
  */
-function fuzzyScore(nameWords, t) {
-  if (t.length < 3) return 0;
-  const tl = loose(t);
-  const ts = skeleton(t);
-  let best = 0;
-  for (const w of nameWords) {
-    if (w.length < 3) continue;
-    const wl = loose(w);
-    if (wl === tl || (ts.length >= 2 && skeleton(w) === ts)) return 3;
-    const d = editDistance(wl, tl);
-    const len = Math.min(wl.length, tl.length);
-    if (d <= 1 && len >= 4) best = Math.max(best, len >= 6 ? 3 : 2);
-    else if (d === 2 && len >= 7) best = Math.max(best, 2);
-  }
-  return best;
-}
-
-/** @returns {{s: number, exact: boolean}} exact = كلمة واحدة على الأقل اتطابقت حرفيًا (مش تقريبي) */
 function scoreMatch(product, terms) {
-  const name = normalizeAr(product.name);
-  const nameWords = name.split(' ');
-  const hay = normalizeAr(`${product.name} ${product.description} ${product.category}`);
+  const name = product._n ?? normalizeAr(product.name);
+  const forms = product._f ?? name.split(' ').map(wordForms);
+  const hay = product._h ?? normalizeAr(`${product.name} ${product.description} ${product.category}`);
   let score = 0;
   let exact = false;
-  for (const raw of terms) {
-    const t = stripAl(raw);
+  for (const { raw, t, f } of terms) {
     if (!t) continue;
     if (name.includes(t) || name.includes(raw)) {
       score += 3;
       exact = true;
-    } else if (nameWords.some((w) => sameWord(w, t))) {
+    } else if (forms.some((w) => sameForms(w, f))) {
       // نفس الكلمة بس بـ"ال" أو جمع أو تاء مربوطة زيادة/ناقصة → مطابقة كاملة مش تقريبية
       score += 3;
       exact = true;
     } else if (hay.includes(t) || hay.includes(raw)) {
       score += 1;
       exact = true;
-    } else score += fuzzyScore(nameWords, t);
+    } else score += fuzzyForms(forms, f);
   }
   // مكافأة لو الاسم/الوصف يحتوي كل الكلمات
-  if (terms.length > 1 && terms.every((t) => hay.includes(stripAl(t)))) score += 2;
+  if (terms.length > 1 && terms.every(({ t }) => hay.includes(t))) score += 2;
   // الاسم بيبدأ بالكلمة المطلوبة ("ماكينه اكيش" قبل "زيت ماكينه")
-  if (score && terms.some((t) => skeleton(stripAl(t)) === skeleton(nameWords[0]))) score += 1;
+  if (score && forms[0] && terms.some(({ f }) => f.k === forms[0].k)) score += 1;
   return { s: score, exact };
 }
 
 /**
- * البحث الذي يستدعيه الموديل.
- * يجرّب بحث الـ API بالجملة كاملة + بكل كلمة على حدة، يدمج النتائج،
- * ثم يرتّبها محلياً على كلمات المستخدم. لو مفيش تطابق حقيقي يرجّع [].
+ * البحث الذي يستدعيه الموديل — محلي على الكتالوج المحفوظ (من غير نداءات لإنياد).
+ * لو مفيش تطابق حقيقي بيجرب التقريبي، ولو برضو مفيش يرجّع [].
  * @returns {Promise<Array>} أعلى النتائج تطابقاً (مختصرة للموديل)
  */
 export async function searchProducts(query, limit = 8, { raw = false } = {}) {
@@ -349,84 +376,41 @@ export async function searchProducts(query, limit = 8, { raw = false } = {}) {
   const searchTerms = terms.length ? terms : rawTerms.filter((t) => t.length >= 2);
   if (searchTerms.length === 0) return [];
 
-  // نجمع pool من عدة عمليات بحث بالـ API (مع dedupe بالـ uuid)
-  const byUuid = new Map();
-  // نبحث بالجملة، وبكل كلمة، وبكل كلمة من غير "ال"
-  const queries = [q];
-  for (const t of searchTerms.slice(0, 3)) {
-    queries.push(t);
-    const s = stripAl(t);
-    if (s !== t) queries.push(s);
-    // "الوايرات" → بحث بـ"واير" كمان، و"كوالين" → "كالون"
-    const syn = LOOSE_SYN[loose(t)];
-    if (syn) queries.push(syn);
-    const st = stem(t);
-    if (st.length >= 3 && st !== s) queries.push(st);
-  }
-  // نستبعد التكرار، وبعدين نبعت كل الاستعلامات بالتوازي (مش تسلسلي) — أسرع بكتير
-  const tried = new Set();
-  const uniqueQueries = [];
-  for (const term of queries) {
-    const key = normalizeAr(term);
-    if (!key || tried.has(key)) continue;
-    tried.add(key);
-    uniqueQueries.push(term);
+  // البحث كله محلي على الكتالوج المحفوظ (من غير نداءات لإنياد لكل رسالة)
+  let pool;
+  try {
+    pool = await ensureCache();
+  } catch (err) {
+    console.warn('[catalog] الكتالوج مش متاح:', err.message);
+    return [];
   }
 
-  const results = await Promise.all(
-    uniqueQueries.map((term) =>
-      cachedApiSearch(term).catch((err) => {
-        console.warn(`[catalog] بحث "${term}" فشل:`, err.message);
-        return [];
-      }),
-    ),
-  );
-  for (const res of results) for (const p of res) byUuid.set(p.uuid, p);
-
-  let pool = [...byUuid.values()];
-  const fromApi = pool.length > 0;
-
-  // آخر حل: فلترة الكاش الكامل محلياً
-  if (pool.length === 0) {
-    try {
-      pool = await ensureCache();
-    } catch (err) {
-      console.warn('[catalog] الكاش مش متاح:', err.message);
-      return [];
-    }
-  }
-
+  const termForms = searchTerms.map((raw) => {
+    const t = stripAl(raw);
+    return { raw, t, f: wordForms(t) };
+  });
   const rank = (list, min) =>
     list
-      .map((p) => ({ p, ...scoreMatch(p, searchTerms) }))
+      .map((p) => ({ p, ...scoreMatch(p, termForms) }))
       .filter((x) => x.s >= min)
       .sort((a, b) => b.s - a.s);
 
-  // من الكاش الكامل بنبقى أصرم في العتبة (عشان نتجنب تطابق حرفي عرضي)
-  let hits = rank(pool, fromApi ? 1 : 3);
-
-  // مفيش تطابق → بحث تقريبي في الكتالوج كله (حرف ناقص/زيادة، "ال"، صالون=كالون...)
-  // بناخد أقرب المنتجات بس، والبوت بيسأل العميل "تقصد كذا؟"
-  if (!hits.length) {
-    try {
-      const all = rank(await ensureCache(), 2);
-      if (all.length) hits = all.filter((x) => x.s >= all[0].s - 1);
-    } catch (err) {
-      console.warn('[catalog] الكاش مش متاح:', err.message);
-    }
+  // 1) تطابق حقيقي (الاسم، أو الكلمة بـ"ال"/جمع، أو الوصف) — وبناخد أعلى المنتجات بس
+  //    عشان "باب فورجيه" مايجيبش كل الأبواب، و"الكالون" مايجيبش منتج الكالون مذكور في وصفه
+  let hits = rank(pool, 1).filter((x) => x.exact);
+  if (hits.length) {
+    const top = hits[0].s;
+    hits = hits.filter((x) => x.s >= Math.max(1, top - 2));
+  } else {
+    // 2) مفيش → تقريبي (حرف ناقص/زيادة، صالون=كالون...) والبوت بيسأل "تقصد كذا؟"
+    const all = rank(pool, 2);
+    if (all.length) hits = all.filter((x) => x.s >= all[0].s - 1);
   }
 
   const approx = new Set(hits.filter((x) => !x.exact).map((x) => x.p));
   const ranked = hits.slice(0, limit).map((x) => x.p);
 
-  // لو مفيش تطابق نصّي حقيقي بس الـ API رجّع نتيجة/اتنين فقط، نعتبرها مقبولة؛
-  // غير كده نرجّع [] عشان البوت يقول "مش لاقي المنتج".
-  const result =
-    ranked.length > 0
-      ? ranked
-      : fromApi && byUuid.size > 0 && byUuid.size <= 2
-        ? [...byUuid.values()]
-        : [];
+  const result = ranked;
 
   // تعديلات السعر اليدوية (لو موظف غيّر سعر بيع/شراء عبر واتساب) بتتطبّق هنا
   // فوق سعر إنياد — مرة واحدة لكل استدعاء، مش لكل منتج.

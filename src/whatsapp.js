@@ -103,10 +103,22 @@ async function uploadImageFromLink(link) {
   }
 }
 
-/** إرسال صورة: بنرفعها بنوعها الصح، ولو ده فشل بنبعت الرابط وواتساب يجيبها بنفسه. */
+/**
+ * صور منتجات إنياد: أغلبها WebP وواتساب رافضها (حتى لو اترفعت بنوعها الصح — code 131053).
+ * بنعدّيها على images.weserv.nl (خدمة مجانية عامة) اللي بتحوّلها JPEG وواتساب بيجيبها بنفسه —
+ * ونداء واحد بدل 3 (تنزيل + رفع + إرسال).
+ */
+function jpegLink(link) {
+  if (!/images\.api\.invyad\.com/.test(link)) return null;
+  return `https://images.weserv.nl/?url=${encodeURIComponent(link.replace(/^https?:\/\//, ''))}&output=jpg&q=85`;
+}
+
+/** إرسال صورة: صور المنتجات بتتحوّل JPEG، وأي صورة تانية بنرفعها بنوعها الصح (ولو فشل بنبعت الرابط). */
 export async function sendImage(to, link, caption) {
   if (!W.token || !W.phoneNumberId || !link) return false;
-  const mediaId = await uploadImageFromLink(link);
+  const converted = jpegLink(link);
+  if (converted) link = converted;
+  const mediaId = converted ? null : await uploadImageFromLink(link);
   const res = await fetch(graphUrl(`${W.phoneNumberId}/messages`), {
     method: 'POST',
     headers: {

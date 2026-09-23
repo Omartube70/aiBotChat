@@ -54,6 +54,7 @@ export const config = {
     voiceId: '21m00Tcm4TlvDq8ikWAM', // TTS_VOICE_ID — صوت ElevenLabs، أو اسم صوت Azure
     azureRegion: 'eastus', // TTS_AZURE_REGION (لو provider=azure)
     maxChars: 700, // ردود أطول من كده بتتبعت نص
+    enabled: false, // VOICE_REPLIES=1 يشغّل الرد بالصوت (محتاج Workers Paid — المجاني بيوقف الرسالة)
   },
 
   sendImages: true, // إرسال صور المنتجات مع الرد
@@ -120,6 +121,7 @@ export function applyEnv(env = {}) {
   config.tts.azureRegion = g('TTS_AZURE_REGION', config.tts.azureRegion);
   const tmax = Number(g('TTS_MAX_CHARS', String(config.tts.maxChars)));
   config.tts.maxChars = Number.isFinite(tmax) && tmax > 0 ? tmax : 700;
+  config.tts.enabled = g('VOICE_REPLIES', '0') === '1';
 
   config.sendImages = g('SEND_IMAGES', '1') !== '0';
   config.botEnabled = g('BOT_ENABLED', '1') !== '0';

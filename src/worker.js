@@ -59,7 +59,7 @@ import {
   getCustomerDir,
   setCustomerName,
 } from './memory.js';
-import { catalogStats, searchProducts, stockSummary } from './catalog.js';
+import { catalogStats, searchProducts, stockSummary, setCatalogKV, refreshCatalogSnapshot } from './catalog.js';
 import { synthesize } from './tts.js';
 import { computeInvoice, buildInvoiceXlsx } from './invoice.js';
 import { syncGoogleContacts, getContactInfo, startConnect, finishConnect } from './contacts.js';
@@ -105,6 +105,7 @@ export default {
     env = withD1(env); // الحالة في D1 (متسقة فورًا) بدل KV
     applyEnv(env); // رخيص و idempotent — بنعمله كل request
     setPriceEnvRef(env);
+    setCatalogKV(env.MEMORY);
     const url = new URL(request.url);
     const { pathname } = url;
     const { method } = request;
@@ -367,12 +368,19 @@ export default {
     env = withD1(env);
     applyEnv(env);
     setPriceEnvRef(env);
+    setCatalogKV(env.MEMORY);
     ctx.waitUntil(
       syncGoogleContacts(env)
         .then((count) => console.log(`[contacts-sync] تمت المزامنة: ${count} اسم`))
         .catch((err) => console.error('[contacts-sync] خطأ:', err.message)),
     );
     ctx.waitUntil(remindStaffWindow(env).catch((err) => console.error('[remind] خطأ:', err.message)));
+    // نسخة الكتالوج المحفوظة بتتحدث هنا — الرسايل مش بتنادي إنياد خالص
+    ctx.waitUntil(
+      refreshCatalogSnapshot()
+        .then((n) => console.log(`[catalog] اتحدث: ${n} منتج`))
+        .catch((err) => console.error('[catalog] تحديث خطأ:', err.message)),
+    );
   },
 };
 
@@ -700,7 +708,11 @@ async function handleMessage(msg, env) {
   const modeChange = detectReplyModeChange(text);
   if (modeChange) {
     await setPref(from, env, modeChange === 'auto' ? null : modeChange);
-    if (modeChange === 'voice') await sendText(from, 'تمام، هرد عليك بالصوت من دلوقتي 🎙️');
+    if (modeChange === 'voice')
+      await sendText(
+        from,
+        config.tts.enabled ? 'تمام، هرد عليك بالصوت من دلوقتي 🎙️' : 'ابعتلي فويس براحتك وأنا هفهمه، بس هرد عليك كتابة 🙏',
+      );
     else if (modeChange === 'text') await sendText(from, 'تمام، هرد عليك بالكتابة من دلوقتي ✍️');
     else await sendText(from, 'تمام، هرد بنفس نوع رسالتك 👍');
   }
@@ -745,7 +757,9 @@ async function handleMessage(msg, env) {
   if (modeChange === 'auto') pref = null;
   else if (modeChange) pref = modeChange;
   else pref = await getPref(from, env);
-  const wantVoice = pref === 'voice' || (!pref && type === 'audio');
+  // الرد الصوتي (MP3 بـ lamejs) محتاج وقت معالجة أكتر من 10ms بتاعة Cloudflare المجاني — بيقتل الرسالة كلها.
+  // VOICE_REPLIES=1 في wrangler.toml لما الحساب يبقى Workers Paid.
+  const wantVoice = config.tts.enabled && (pref === 'voice' || (!pref && type === 'audio'));
 
   let deliveredAsVoice = false;
   if (wantVoice && reply.length <= config.tts.maxChars) {
