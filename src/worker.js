@@ -1364,8 +1364,11 @@ async function sendStaffMessage(agent, kind, c, message, env) {
   const recent = (await getCustomerList(env, 100)).find((x) => x.id === c.id);
   const lastAt = recent?.at || (await getCustomerDir(env))[c.id]?.last || 0;
   if (!lastAt || Date.now() - lastAt > 24 * 3600 * 1000) {
+    // الرسالة طالعة من تليفون الموظف (مفيهوش بوت) — فبنخلّي أسهل رد للزبون يروح لرقم المحل:
+    // لينك بيفتح محادثة البوت والرسالة مكتوبة جاهزة، يدوس إرسال والبوت يكمّل معاه
     const shop = config.store.whatsapp.replace(/\D/g, '');
-    const full = `${text}\n\nولو حابب تكلّم المحل على طول وتعرف أي سعر: https://wa.me/${shop}`;
+    const hello = encodeURIComponent('السلام عليكم، عايز أسأل على سعر');
+    const full = `${text}\n\n👈 عشان تعرف أي سعر على طول، دوس هنا وابعت:\nhttps://wa.me/${shop}?text=${hello}`;
     await sendText(
       agent,
       `📲 ${c.name || 'الزبون'} (آخره ${c.id.slice(-4)}) ماكلّمناش ${lastAt ? agoLabel(Date.now() - lastAt) : 'قبل كده'} — ` +
