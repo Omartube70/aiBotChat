@@ -220,38 +220,66 @@ function editDistance(a, b) {
   return dp[a.length];
 }
 
+// حروف بتتلخبط في الكتابة أو في سماع الفويس (صالون/كالون، قالون، طرنبه...) → حرف واحد
+const LOOSE = { ص: 'س', ث: 'س', ق: 'ك', ذ: 'ز', ظ: 'ض', ط: 'ت', ض: 'د', غ: 'ع' };
+
+/** شكل "مرن" للكلمة: من غير ال/بال/وال/لل، الحروف المتشابهة موحّدة، والحرف المكرر مرة واحدة. */
+function loose(w) {
+  return w
+    .replace(/^(?:وال|بال|لل|ال)(?=.{3})/, '')
+    .replace(/[صثقذظطضغ]/g, (c) => LOOSE[c])
+    .replace(/(.)\1+/g, '$1');
+}
+
+/** هيكل الكلمة من غير حروف المد والهاء الأخيرة: ماكنه=ماكينه، كلون=كالون، حبال=حبل، زراير=زرار. */
+function skeleton(w) {
+  return loose(w).replace(/[اوي]/g, '').replace(/ه$/, '');
+}
+
 /**
  * درجة التطابق التقريبي لكلمة t مع أقرب كلمة في الاسم.
- * @returns {number} 0 = لا يوجد، 2 = تقريبي، 3 = شبه مطابق (كلمة طويلة بفرق حرف واحد)
+ * @returns {number} 0 = لا يوجد، 2 = تقريبي، 3 = شبه مطابق (نفس الكلمة بكتابة مختلفة)
  */
 function fuzzyScore(nameWords, t) {
-  if (t.length < 5) return 0;
+  if (t.length < 3) return 0;
+  const tl = loose(t);
+  const ts = skeleton(t);
   let best = 0;
   for (const w of nameWords) {
-    if (w.length < 4) continue;
-    const d = editDistance(w, t);
-    if (d <= 1 && Math.min(w.length, t.length) >= 6) best = Math.max(best, 3);
-    else if (d <= 1) best = Math.max(best, 2);
-    else if (d === 2 && Math.min(w.length, t.length) >= 7) best = Math.max(best, 2);
+    if (w.length < 3) continue;
+    const wl = loose(w);
+    if (wl === tl || (ts.length >= 2 && skeleton(w) === ts)) return 3;
+    const d = editDistance(wl, tl);
+    const len = Math.min(wl.length, tl.length);
+    if (d <= 1 && len >= 4) best = Math.max(best, len >= 6 ? 3 : 2);
+    else if (d === 2 && len >= 7) best = Math.max(best, 2);
   }
   return best;
 }
 
+/** @returns {{s: number, exact: boolean}} exact = كلمة واحدة على الأقل اتطابقت حرفيًا (مش تقريبي) */
 function scoreMatch(product, terms) {
   const name = normalizeAr(product.name);
   const nameWords = name.split(' ');
   const hay = normalizeAr(`${product.name} ${product.description} ${product.category}`);
   let score = 0;
+  let exact = false;
   for (const raw of terms) {
     const t = stripAl(raw);
     if (!t) continue;
-    if (name.includes(t) || name.includes(raw)) score += 3;
-    else if (hay.includes(t) || hay.includes(raw)) score += 1;
-    else score += fuzzyScore(nameWords, t);
+    if (name.includes(t) || name.includes(raw)) {
+      score += 3;
+      exact = true;
+    } else if (hay.includes(t) || hay.includes(raw)) {
+      score += 1;
+      exact = true;
+    } else score += fuzzyScore(nameWords, t);
   }
   // مكافأة لو الاسم/الوصف يحتوي كل الكلمات
   if (terms.length > 1 && terms.every((t) => hay.includes(stripAl(t)))) score += 2;
-  return score;
+  // الاسم بيبدأ بالكلمة المطلوبة ("ماكينه اكيش" قبل "زيت ماكينه")
+  if (score && terms.some((t) => skeleton(stripAl(t)) === skeleton(nameWords[0]))) score += 1;
+  return { s: score, exact };
 }
 
 /**
@@ -311,15 +339,28 @@ export async function searchProducts(query, limit = 8, { raw = false } = {}) {
     }
   }
 
-  // من الكاش الكامل بنبقى أصرم في العتبة (عشان نتجنب تطابق حرفي عرضي)
-  const minScore = fromApi ? 1 : 3;
+  const rank = (list, min) =>
+    list
+      .map((p) => ({ p, ...scoreMatch(p, searchTerms) }))
+      .filter((x) => x.s >= min)
+      .sort((a, b) => b.s - a.s);
 
-  const ranked = pool
-    .map((p) => ({ p, s: scoreMatch(p, searchTerms) }))
-    .filter((x) => x.s >= minScore)
-    .sort((a, b) => b.s - a.s)
-    .slice(0, limit)
-    .map((x) => x.p);
+  // من الكاش الكامل بنبقى أصرم في العتبة (عشان نتجنب تطابق حرفي عرضي)
+  let hits = rank(pool, fromApi ? 1 : 3);
+
+  // مفيش تطابق → بحث تقريبي في الكتالوج كله (حرف ناقص/زيادة، "ال"، صالون=كالون...)
+  // بناخد أقرب المنتجات بس، والبوت بيسأل العميل "تقصد كذا؟"
+  if (!hits.length) {
+    try {
+      const all = rank(await ensureCache(), 2);
+      if (all.length) hits = all.filter((x) => x.s >= all[0].s - 1);
+    } catch (err) {
+      console.warn('[catalog] الكاش مش متاح:', err.message);
+    }
+  }
+
+  const approx = new Set(hits.filter((x) => !x.exact).map((x) => x.p));
+  const ranked = hits.slice(0, limit).map((x) => x.p);
 
   // لو مفيش تطابق نصّي حقيقي بس الـ API رجّع نتيجة/اتنين فقط، نعتبرها مقبولة؛
   // غير كده نرجّع [] عشان البوت يقول "مش لاقي المنتج".
@@ -335,7 +376,11 @@ export async function searchProducts(query, limit = 8, { raw = false } = {}) {
   const overrides = await getOverrides();
   // raw: بيانات كاملة للمدير (سعر الشراء وحالة المخزون) — مش للموديل ولا للعملاء
   if (raw) return result.map((p) => ({ ...p, override: overrides[normalizeAr(p.name)] || null }));
-  return result.map((p) => compactForModel(p, overrides[normalizeAr(p.name)]));
+  return result.map((p) => ({
+    ...compactForModel(p, overrides[normalizeAr(p.name)]),
+    // العميل غالبًا كتب الاسم غلط أو الفويس اتسمع غلط — البوت يسأله "تقصد كذا؟"
+    تقريبي: approx.has(p) || undefined,
+  }));
 }
 
 /** ملخص المخزون للمدير: عدد المنتجات، المتاح، والخلصان. */

@@ -12,8 +12,7 @@ export const config = {
   gemini: {
     apiKey: '',
     model: 'gemini-flash-lite-latest',
-    // موديل تفريغ الصوت — flash العادي أضمن للصوت من flash-lite
-    audioModel: 'gemini-flash-latest',
+    audioModel: 'gemini-flash-lite-latest', // أسرع ومش بيزدحم زي flash؛ flash العادي احتياطي لو فشل
     baseUrl: 'https://generativelanguage.googleapis.com/v1beta',
   },
 

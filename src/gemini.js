@@ -11,6 +11,8 @@ const SYSTEM_PROMPT = `أنت موظف خدمة عملاء ودود في متج�
 - في كل رسالة هتلاقي قسم "منتجات من الكتالوج" فيه نتائج بحث فعلية من المتجر. اعتمد عليه فقط.
 - لا تخترع أي سعر أو منتج. لو مفيش نتائج مناسبة في القسم ده، قول للعميل إنك مش لاقي المنتج بالاسم ده،
   واطلب منه يوضّح الاسم أكتر أو يبعت صورة، واداله رقم المحل: ${S.phone}.
+- لو المنتجات عليها "تقريبي": true، يبقى العميل غالبًا كتب الاسم غلط أو الفويس اتسمع غلط (زي "صالون" بدل "كالون"):
+  متقولش إنك مش لاقي المنتج — قوله بلطف "حضرتك تقصد [اسم المنتج]؟" واعرض الأسعار عادي.
 - الأسعار كلها بالجنيه المصري (${S.currency}).
 - لو المنتج ليه أكتر من نوع/سعر، اعرضهم كلهم في نقاط.
 - ممنوع تقول للعميل إن أي منتج "غير متوفر" أو "خلص" أو "مش موجود في المخزون" — إدّيه السعر والتفاصيل عادي زي أي منتج تاني، من غير ما تتكلم عن حالة التوفر خالص.
@@ -64,6 +66,10 @@ const SYSTEM_PROMPT = `أنت موظف خدمة عملاء ودود في متج�
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
+// flash-lite بيفكّر قبل ما يرد لو محددناش — "minimal" بيخلّي الرد أسرع 3-4 مرات.
+// الموديلات التانية (flash العادي) بترفض minimal، فبنحطه للـ lite بس.
+const fast = () => (/lite/.test(config.gemini.model) ? { thinkingConfig: { thinkingLevel: 'minimal' } } : {});
+
 function endpoint() {
   return `${config.gemini.baseUrl}/models/${config.gemini.model}:generateContent?key=${config.gemini.apiKey}`;
 }
@@ -73,7 +79,7 @@ async function callGemini(contents, { retries = 2 } = {}) {
   const payload = JSON.stringify({
     systemInstruction: { parts: [{ text: SYSTEM_PROMPT }] },
     contents,
-    generationConfig: { temperature: 0.4, maxOutputTokens: 1200 },
+    generationConfig: { temperature: 0.4, maxOutputTokens: 1200, ...fast() },
     safetySettings: [
       'HARM_CATEGORY_HARASSMENT',
       'HARM_CATEGORY_HATE_SPEECH',
@@ -147,7 +153,7 @@ export async function findContractors(area = 'مصر') {
 }
 
 async function groundedSearch(prompt) {
-  const url = `${config.gemini.baseUrl}/models/${config.gemini.audioModel}:generateContent?key=${config.gemini.apiKey}`;
+  const url = `${config.gemini.baseUrl}/models/gemini-flash-latest:generateContent?key=${config.gemini.apiKey}`;
   const res = await fetch(url, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -252,7 +258,7 @@ export async function extractOrder(userText, products) {
   const url = `${config.gemini.baseUrl}/models/${config.gemini.model}:generateContent?key=${config.gemini.apiKey}`;
   const body = JSON.stringify({
     contents: [{ role: 'user', parts: [{ text: prompt }] }],
-    generationConfig: { temperature: 0, responseMimeType: 'application/json' },
+    generationConfig: { temperature: 0, responseMimeType: 'application/json', ...fast() },
   });
 
   const res = await fetch(url, {
@@ -324,7 +330,7 @@ export async function extractOfferFields(text) {
     signal: AbortSignal.timeout(15000),
     body: JSON.stringify({
       contents: [{ role: 'user', parts: [{ text: prompt }] }],
-      generationConfig: { temperature: 0, responseMimeType: 'application/json' },
+      generationConfig: { temperature: 0, responseMimeType: 'application/json', ...fast() },
     }),
   });
   if (!res.ok) {
@@ -376,7 +382,7 @@ export async function extractDiscount(text) {
     signal: AbortSignal.timeout(15000),
     body: JSON.stringify({
       contents: [{ role: 'user', parts: [{ text: prompt }] }],
-      generationConfig: { temperature: 0, responseMimeType: 'application/json' },
+      generationConfig: { temperature: 0, responseMimeType: 'application/json', ...fast() },
     }),
   });
   if (!res.ok) throw new Error(`extractDiscount ${res.status}`);
@@ -406,7 +412,7 @@ function base64FromArrayBuffer(buf) {
  * بيرجع للموديل العادي (flash-lite) — flash-lite بيفهم الصوت والصور كويس برضو.
  */
 async function postMedia(body) {
-  const models = [...new Set([config.gemini.audioModel, config.gemini.model].filter(Boolean))];
+  const models = [...new Set([config.gemini.audioModel, config.gemini.model, 'gemini-flash-latest'].filter(Boolean))];
   let res;
   for (const model of models) {
     const url = `${config.gemini.baseUrl}/models/${model}:generateContent?key=${config.gemini.apiKey}`;
@@ -442,7 +448,11 @@ export async function transcribeAudio(buffer, mimeType = 'audio/ogg') {
             },
           },
           {
-            text: 'فرّغ الرسالة الصوتية دي نصًّا بالعربي حرفيًا. اكتب النص فقط من غير أي مقدمات أو تعليق. لو مفيش كلام واضح رجّع نص فاضي.',
+            text:
+              'فرّغ الرسالة الصوتية دي نصًّا بالعربي حرفيًا (عامية مصرية). اكتب النص فقط من غير أي مقدمات أو تعليق. لو مفيش كلام واضح رجّع نص فاضي.\n' +
+              'المتكلم غالبًا بيسأل عن قطع غيار مصاعد أو تركيب مصعد. لو كلمة شبه اسم قطعة من دول اكتبها بالاسم الصح: ' +
+              'كالون، طرمبة، ماكينة، كارتة، كنتاكتور، مارش، سكينة، ريليه، فورجيه، كابينة، حبل، طارة، ثقل، مغناطيس، زرار، ' +
+              'انفرتر، كنترول، سيكور، افرلود، مناول، كاوتش، شفرة، كامة، أسانسير، مصعد.',
           },
         ],
       },

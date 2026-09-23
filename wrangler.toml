@@ -14,7 +14,7 @@ id = "0c43dfccfe174d43afc0cfa7577e2cce"
 # المفاتيح السرّية بتتحط بـ: npx wrangler secret put <NAME>
 [vars]
 GEMINI_MODEL = "gemini-flash-lite-latest"
-GEMINI_AUDIO_MODEL = "gemini-flash-latest"
+GEMINI_AUDIO_MODEL = "gemini-flash-lite-latest"
 TTS_PROVIDER = "gemini"
 TTS_GEMINI_MODEL = "gemini-3.8-flash-tts"
 TTS_GEMINI_VOICE = "Charon"
