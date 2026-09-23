@@ -1364,9 +1364,9 @@ function reengageMessage(name, sender = null, fromStaffPhone = false) {
   return [pick(hello), intro, pick(miss), pick(stock), pick(offer)].join('\n');
 }
 
-/** اسم اللي باعت الرسالة (عشان الزبون يعرف مين بيكلّمه) — المدير بس ليه اسم معروف. */
+/** اسم اللي باعت الرسالة (عشان الزبون يعرف مين بيكلّمه) — الأرقام التلاتة بيبعتوا باسم الحاج محمد. */
 function senderName(agent) {
-  return agent === config.agent.manager ? 'الحاج محمد' : null;
+  return agentNumbers().includes(agent) ? 'الحاج محمد' : null;
 }
 
 /** ينفّذ إرسال لزبون واحد اتحدد (رسالة معيّنة أو رسالة ودّ). */
