@@ -1399,6 +1399,17 @@ async function staffQuotePrice(agent, cmd, env) {
  */
 async function handleStaffRequest(agent, t, env) {
   const kv = env.MEMORY;
+
+  // أوامر رواتب واضحة → على طول من غير Gemini (أسرع، ومايستهلكش من حد Gemini المجاني)
+  const a = arKey(t);
+  const payrollShortcut = /(?:^|\s)(?:هن?خرج|نخرج|اخرج|هن?شيل|نشيل|شيل|هن?مشي|نمشي|امشي|امسح|احذف|حذف|طلع)\s*(?:لي\s*)?(?:ال)?موظف/.test(a)
+    ? 'حذف موظف'
+    : /(?:^|\s)(?:دخل|دخللي|ضيف|ضيفلي|زود|زودلي|اضف|اضافه|نزل|سجل)\s*(?:لي\s*)?(?:ال)?موظف/.test(a)
+      ? 'موظف جديد'
+      : /(?:شغل|نشتغل|افتح|افتحلي|ندخل)\s*(?:في|علي|على)?\s*(?:ال)?(?:رواتب|مرتبات)/.test(a)
+        ? 'مساعده رواتب'
+        : null;
+  if (payrollShortcut && (await handlePayroll(agent, payrollShortcut, env))) return true;
   const log = await getCustomerList(env, 100);
   const byId = new Map();
   for (const c of log) {
