@@ -1,5 +1,6 @@
 import { config } from './config.js';
 import { searchProducts } from './catalog.js';
+import { noteError } from './diag.js';
 
 const S = config.store;
 
@@ -319,6 +320,35 @@ export async function generateReply(userText, history = [], { customerName } = {
     reply = '';
   }
 
+  // قفل ضد الأسعار المتألفة: أي سعر في الرد لازم يكون من الكتالوج (أو رقم قاله الزبون نفسه).
+  // لو لأ → نطلب منه يكتب تاني مرة، ولو برضو غلط → رد مبني من بيانات الكتالوج مباشرة.
+  const userNums = [userText, ...history.filter((m) => m.role === 'user').map((m) => m.parts?.[0]?.text || '')];
+  if (reply && !pricesGrounded(reply, products, userNums)) {
+    console.warn('[gemini] رد فيه أسعار مش من الكتالوج:', reply.replace(/\n/g, ' ').slice(0, 200));
+    noteError(`[أسعار متألفة] اتمنعت: ${reply.replace(/\n/g, ' ').slice(0, 160)}`);
+    try {
+      const data = await callGemini([
+        ...contents,
+        { role: 'model', parts: [{ text: reply }] },
+        {
+          role: 'user',
+          parts: [
+            {
+              text:
+                'تنبيه من النظام (مش من الزبون): ردك اللي فات فيه منتجات أو أسعار مش موجودة في قسم "منتجات من الكتالوج". ' +
+                'اكتب الرد تاني بنفس الأسلوب، بالمنتجات والأسعار اللي في القسم بس بالحرف. ولو مفيش منتج مناسب قول إنك مش لاقيه.',
+            },
+          ],
+        },
+      ]);
+      const parts = data.candidates?.[0]?.content?.parts || [];
+      reply = parts.map((p) => p.text).filter(Boolean).join('\n').trim();
+    } catch {
+      reply = '';
+    }
+    if (!reply || !pricesGrounded(reply, products, userNums)) reply = catalogReply(products);
+  }
+
   if (!reply) {
     reply = `معلش، النظام مضغوط شوية دلوقتي. جرّب تبعت تاني بعد دقيقة، أو كلّمنا على واتساب: ${S.whatsapp}`;
   }
@@ -331,6 +361,48 @@ export async function generateReply(userText, history = [], { customerName } = {
   ];
 
   return { reply, history: newHistory, products };
+}
+
+// رقم جنبه عملة: "800 ج.م" / "1,400 جنيه" / "150ج"
+const PRICE_RE = /(\d[\d,٬.]*)\s*(?:ج\s*\.?\s*م|جنيه|جنية|ج(?![\p{L}])|LE\b|EGP\b)/gu;
+const toNum = (s) => Number(String(s).replace(/[,٬]/g, ''));
+
+/**
+ * كل سعر في الرد موجود في الكتالوج؟ مسموح كمان: مضاعفات سعر (كمية × سعر)، مجموع سعرين،
+ * وأي رقم كتبه الزبون بنفسه (زي تاجر بيقول سعره).
+ */
+function pricesGrounded(reply, products, userTexts = []) {
+  const toLatin = (s) => String(s).replace(/[٠-٩]/g, (d) => '٠١٢٣٤٥٦٧٨٩'.indexOf(d));
+  const allowed = new Set();
+  const add = (n) => Number.isFinite(n) && n > 0 && allowed.add(Math.round(n * 100) / 100);
+  for (const p of products) {
+    add(p._price);
+    add(p._priceMax);
+    const txt = toLatin(`${p['السعر'] || ''} ${(p['الأنواع'] || []).join(' ')}`);
+    for (const m of txt.matchAll(/\d[\d,٬.]*/g)) add(toNum(m[0]));
+  }
+  for (const t of userTexts) for (const m of toLatin(t).matchAll(/\d[\d,٬.]*/g)) add(toNum(m[0]));
+  const list = [...allowed];
+  for (const m of toLatin(reply).matchAll(PRICE_RE)) {
+    const n = Math.round(toNum(m[1]) * 100) / 100;
+    if (!Number.isFinite(n) || allowed.has(n)) continue;
+    const multiple = list.some((p) => p >= 1 && n % p === 0 && n / p <= 500);
+    const pairSum = list.some((a) => list.some((b) => Math.abs(a + b - n) < 0.01));
+    if (!multiple && !pairSum) return false;
+  }
+  return true;
+}
+
+/** رد احتياطي مبني من بيانات الكتالوج مباشرة (لما Gemini يكرر يألّف أسعار). */
+function catalogReply(products) {
+  if (!products.length) {
+    return (
+      'معلش، مش لاقي المنتج ده بالاسم ده عندنا 🙏\n' +
+      `ممكن توضّحلي الاسم أكتر أو تبعتلي صورته؟ أو كلّمنا على ${S.phone}`
+    );
+  }
+  const lines = products.slice(0, 10).map((p) => `• ${p['الاسم']}: ${p['السعر']}`);
+  return `دي الأسعار المتاحة عندنا:\n${lines.join('\n')}\n\nتحب أساعدك تختار الأنسب؟`;
 }
 
 /**

@@ -266,6 +266,8 @@ function stem(w) {
       break;
     }
   }
+  // "ويرات" → "وير" → "واير"
+  if (LOOSE_SYN[s]) s = loose(LOOSE_SYN[s]);
   return s;
 }
 
