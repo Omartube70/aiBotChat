@@ -46,21 +46,32 @@ export const config = {
 
   // تحويل نص → كلام للرد الصوتي
   tts: {
-    provider: 'elevenlabs', // TTS_PROVIDER: elevenlabs | azure
-    apiKey: '', // TTS_API_KEY (لو فاضي، الرد بيفضل نص)
+    provider: 'gemini', // TTS_PROVIDER: gemini (مجاني بـ GEMINI_API_KEY) | elevenlabs | azure
+    apiKey: '', // TTS_API_KEY لـ elevenlabs/azure (لو فاضي، الرد بيفضل نص)
+    geminiModel: 'gemini-3.8-flash-tts', // TTS_GEMINI_MODEL — موديل الـ TTS المتاح في الـ free tier
+    geminiVoice: 'Charon', // TTS_GEMINI_VOICE — من أصوات Gemini الجاهزة
     voiceId: '21m00Tcm4TlvDq8ikWAM', // TTS_VOICE_ID — صوت ElevenLabs، أو اسم صوت Azure
     azureRegion: 'eastus', // TTS_AZURE_REGION (لو provider=azure)
     maxChars: 700, // ردود أطول من كده بتتبعت نص
   },
 
   sendImages: true, // إرسال صور المنتجات مع الرد
+  botEnabled: true, // BOT_ENABLED=0 يوقف الردود كلها مؤقتًا من غير ما يلغي أي إعداد
+
+  // تكامل Facebook Messenger (صفحة توب باور للمصاعد)
+  facebook: {
+    pageAccessToken: '', // FB_PAGE_ACCESS_TOKEN
+    verifyToken: '', // FB_VERIFY_TOKEN (لو فاضي بيستخدم WHATSAPP_VERIFY_TOKEN)
+  },
 
   // التحويل لموظف بشري + متابعة الإدارة
   agent: {
     manager: '201000363323', // AGENT_MANAGER — تحويل "عايز أكلم حد"
     accounts: '201050699420', // AGENT_ACCOUNTS — حسابات / فواتير / دفع
-    ccNumbers: ['201000363323', '201003044660'], // CC_NUMBERS — بتوصلهم نسخة من كل رسالة عميل
+    management: ['201000363323', '201003044660'], // AGENT_MANAGEMENT — "عايز حد من الإدارة" (بيوصل الاتنين)
+    ccNumbers: ['201000363323', '201003044660', '201050699420'], // CC_NUMBERS — بتوصلهم نسخة من كل رسالة عميل
     handoffTtl: 7200, // ثواني — بعدها البوت يرجع تلقائيًا لو الموظف نسي يقفل
+    admins: ['201000363323', '201003044660'], // AGENT_ADMINS — صلاحيات المدير (المخزون وبيانات المحل)
   },
 
   catalogTtlMs: 300 * 1000,
@@ -93,16 +104,38 @@ export function applyEnv(env = {}) {
   config.tts.provider = g('TTS_PROVIDER', config.tts.provider);
   config.tts.apiKey = g('TTS_API_KEY');
   config.tts.voiceId = g('TTS_VOICE_ID', config.tts.voiceId);
+  config.tts.geminiModel = g('TTS_GEMINI_MODEL', config.tts.geminiModel);
+  config.tts.geminiVoice = g('TTS_GEMINI_VOICE', config.tts.geminiVoice);
   config.tts.azureRegion = g('TTS_AZURE_REGION', config.tts.azureRegion);
   const tmax = Number(g('TTS_MAX_CHARS', String(config.tts.maxChars)));
   config.tts.maxChars = Number.isFinite(tmax) && tmax > 0 ? tmax : 700;
 
   config.sendImages = g('SEND_IMAGES', '1') !== '0';
+  config.botEnabled = g('BOT_ENABLED', '1') !== '0';
+
+  config.facebook.pageAccessToken = g('FB_PAGE_ACCESS_TOKEN');
+  config.facebook.verifyToken = g('FB_VERIFY_TOKEN', config.whatsapp.verifyToken);
   config.agent.manager = g('AGENT_MANAGER', config.agent.manager).replace(/\D/g, '');
   config.agent.accounts = g('AGENT_ACCOUNTS', config.agent.accounts).replace(/\D/g, '');
+  config.agent.management = [
+    ...new Set(
+      g('AGENT_MANAGEMENT', config.agent.management.join(','))
+        .split(',')
+        .map((s) => s.replace(/\D/g, ''))
+        .filter(Boolean),
+    ),
+  ];
   config.agent.ccNumbers = [
     ...new Set(
       g('CC_NUMBERS', config.agent.ccNumbers.join(','))
+        .split(',')
+        .map((s) => s.replace(/\D/g, ''))
+        .filter(Boolean),
+    ),
+  ];
+  config.agent.admins = [
+    ...new Set(
+      g('AGENT_ADMINS', config.agent.admins.join(','))
         .split(',')
         .map((s) => s.replace(/\D/g, ''))
         .filter(Boolean),

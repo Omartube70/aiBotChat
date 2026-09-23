@@ -15,7 +15,9 @@ id = "0c43dfccfe174d43afc0cfa7577e2cce"
 [vars]
 GEMINI_MODEL = "gemini-flash-lite-latest"
 GEMINI_AUDIO_MODEL = "gemini-flash-latest"
-TTS_PROVIDER = "elevenlabs"
+TTS_PROVIDER = "gemini"
+TTS_GEMINI_MODEL = "gemini-3.8-flash-tts"
+TTS_GEMINI_VOICE = "Charon"
 TTS_VOICE_ID = "21m00Tcm4TlvDq8ikWAM"
 TTS_MAX_CHARS = "700"
 WHATSAPP_VERIFY_TOKEN = "quds-bot-verify-123"
@@ -24,9 +26,37 @@ STORE_SLUG = "httpsgcokgspyk1uqu"
 INYAD_API_BASE = "https://api.inyad.com/storefront"
 CATALOG_TTL_SECONDS = "300"
 SEND_IMAGES = "1"
+# غيّرها لـ "0" وانشر عشان توقف رد البوت مؤقتًا، وارجّعها "1" عشان يشتغل تاني
+BOT_ENABLED = "1"
 AGENT_MANAGER = "201000363323"
 AGENT_ACCOUNTS = "201050699420"
-CC_NUMBERS = "201000363323,201003044660"
+AGENT_MANAGEMENT = "201000363323,201003044660"
+# أرقام بصلاحيات المدير (المخزون وبيانات المحل)
+AGENT_ADMINS = "201000363323,201003044660"
+CC_NUMBERS = "201000363323,201003044660,201050699420"
 HANDOFF_TTL_SECONDS = "7200"
 # للتجربة بدون واتساب عبر /debug/chat و /debug/search. شيله (أو خليه "0") بعد ما تخلص.
 ENABLE_DEBUG_CHAT = "1"
+
+# تكامل Facebook Messenger (صفحة توب باور للمصاعد) — يحتاج secret واحد:
+#   npx wrangler secret put FB_PAGE_ACCESS_TOKEN
+# رابط الـ webhook: https://<اسم-الووركر>.workers.dev/webhook/messenger
+# نفس WHATSAPP_VERIFY_TOKEN بيتستخدم كـ verify token في Meta App، إلا لو حطيت FB_VERIFY_TOKEN منفصل.
+
+# مزامنة أسماء جوجل (Google Contacts) تلقائيًا كل 30 دقيقة — يحتاج secrets:
+#   GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, GOOGLE_REFRESH_TOKEN
+[triggers]
+crons = ["*/30 * * * *"]
+
+# قالب عرض تركيب المصعد (Word) بيتضمّن في الووركر كـ ArrayBuffer
+[[rules]]
+type = "Data"
+globs = ["**/*.docx"]
+fallthrough = true
+
+# حالة المحادثات (أسئلة العرض، أرقام الزباين، الطلبات...) — D1 متسق فورًا، عكس KV
+# اللي ممكن يرجّع نسخة قديمة لحد 60 ثانية بعد الكتابة (وده كان بيخلّي البوت يعيد نفس السؤال).
+[[d1_databases]]
+binding = "DB"
+database_name = "quds-state"
+database_id = "705fa6b9-ecc2-4941-a2cd-af537fe03b15"

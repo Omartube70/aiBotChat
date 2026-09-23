@@ -83,6 +83,11 @@ export function buildInvoiceXlsx({ lines, grand }) {
     [`الأسعار قابلة للتغيير — للتأكيد كلمنا واتساب ${S.whatsapp}`],
   ];
 
+  return buildTableXlsx(rows, 'فاتورة');
+}
+
+/** يبني xlsx بسيط من مصفوفة صفوف (RTL) — يستخدمه الفاتورة وشيت الرواتب. */
+export function buildTableXlsx(rows, sheetName = 'شيت') {
   const sheetData = rows
     .map((cells, r) => {
       const c = cells
@@ -123,7 +128,7 @@ export function buildInvoiceXlsx({ lines, grand }) {
     'xl/workbook.xml':
       `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>` +
       `<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">` +
-      `<sheets><sheet name="فاتورة" sheetId="1" r:id="rId1"/></sheets></workbook>`,
+      `<sheets><sheet name="${esc(sheetName)}" sheetId="1" r:id="rId1"/></sheets></workbook>`,
     'xl/_rels/workbook.xml.rels':
       `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>` +
       `<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">` +

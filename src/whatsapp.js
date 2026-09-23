@@ -6,11 +6,15 @@ function graphUrl(path) {
   return `https://graph.facebook.com/${W.graphVersion}/${path}`;
 }
 
-/** إرسال رسالة نصية للعميل عبر WhatsApp Cloud API. */
+/**
+ * إرسال رسالة نصية للعميل عبر WhatsApp Cloud API.
+ * @returns {Promise<string|null>} معرّف الرسالة المُرسلة (wamid) — مفيد عشان لو حد
+ *   عمل "رد" (quote) على الرسالة دي نقدر نربطها برقم العميل الأصلي.
+ */
 export async function sendText(to, body) {
   if (!W.token || !W.phoneNumberId) {
     console.warn('[whatsapp] التوكن أو Phone Number ID ناقص — مش هيتبعت حاجة');
-    return;
+    return null;
   }
 
   const res = await fetch(graphUrl(`${W.phoneNumberId}/messages`), {
@@ -31,6 +35,13 @@ export async function sendText(to, body) {
   if (!res.ok) {
     const errText = await res.text().catch(() => '');
     console.error(`[whatsapp] فشل الإرسال ${res.status}: ${errText.slice(0, 400)}`);
+    return null;
+  }
+  try {
+    const data = await res.json();
+    return data?.messages?.[0]?.id || null;
+  } catch {
+    return null;
   }
 }
 
@@ -113,6 +124,121 @@ export async function sendLocation(to, { lat, lng, name, address }) {
   if (!res.ok) {
     const t = await res.text().catch(() => '');
     console.error(`[whatsapp] فشل إرسال الموقع ${res.status}: ${t.slice(0, 300)}`);
+    return false;
+  }
+  return true;
+}
+
+/**
+ * يبعت "جهة اتصال" (كارت) — الموظف يقدر يحفظها على موبايله بضغطة.
+ * @param {{name: string, phone: string, address?: string, note?: string}} c phone بصيغة دولية (2010...)
+ */
+export async function sendContact(to, { name, phone, address, note }) {
+  if (!W.token || !W.phoneNumberId || !phone) return false;
+  const res = await fetch(graphUrl(`${W.phoneNumberId}/messages`), {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${W.token}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      messaging_product: 'whatsapp',
+      recipient_type: 'individual',
+      to,
+      type: 'contacts',
+      contacts: [
+        {
+          name: { formatted_name: name || phone, first_name: name || phone },
+          phones: [{ phone: `+${phone}`, type: 'CELL', wa_id: phone }],
+          addresses: address ? [{ street: address, type: 'HOME' }] : undefined,
+          org: note ? { company: note } : undefined,
+        },
+      ],
+    }),
+  });
+  if (!res.ok) {
+    const t = await res.text().catch(() => '');
+    console.error(`[whatsapp] فشل إرسال جهة الاتصال ${res.status}: ${t.slice(0, 300)}`);
+    return false;
+  }
+  return true;
+}
+
+/**
+ * رسالة فيها لحد 3 زراير تحت بعض (العميل بيدوس بدل ما يكتب).
+ * @param {Array<{id: string, title: string}>} buttons العنوان لحد 20 حرف
+ */
+export async function sendButtons(to, body, buttons) {
+  if (!W.token || !W.phoneNumberId) return false;
+  const res = await fetch(graphUrl(`${W.phoneNumberId}/messages`), {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${W.token}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      messaging_product: 'whatsapp',
+      recipient_type: 'individual',
+      to,
+      type: 'interactive',
+      interactive: {
+        type: 'button',
+        body: { text: body },
+        action: {
+          buttons: buttons.slice(0, 3).map((b) => ({
+            type: 'reply',
+            reply: { id: b.id, title: b.title.slice(0, 20) },
+          })),
+        },
+      },
+    }),
+  });
+  if (!res.ok) {
+    const t = await res.text().catch(() => '');
+    console.error(`[whatsapp] فشل إرسال الزراير ${res.status}: ${t.slice(0, 300)}`);
+    return false;
+  }
+  return true;
+}
+
+/**
+ * يبعت فورم WhatsApp Flow (زرار بيفتح خانات تتملي).
+ * @param {{flowId: string, flowToken: string, screen: string, body: string, cta: string, header?: string}} f
+ */
+export async function sendFlow(to, { flowId, flowToken, screen, body, cta, header }) {
+  if (!W.token || !W.phoneNumberId || !flowId) return false;
+  const res = await fetch(graphUrl(`${W.phoneNumberId}/messages`), {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${W.token}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      messaging_product: 'whatsapp',
+      recipient_type: 'individual',
+      to,
+      type: 'interactive',
+      interactive: {
+        type: 'flow',
+        header: header ? { type: 'text', text: header } : undefined,
+        body: { text: body },
+        action: {
+          name: 'flow',
+          parameters: {
+            flow_message_version: '3',
+            flow_token: flowToken,
+            flow_id: flowId,
+            flow_cta: cta,
+            flow_action: 'navigate',
+            flow_action_payload: { screen },
+          },
+        },
+      },
+    }),
+  });
+  if (!res.ok) {
+    const t = await res.text().catch(() => '');
+    console.error(`[whatsapp] فشل إرسال الفورم ${res.status}: ${t.slice(0, 300)}`);
     return false;
   }
   return true;
@@ -237,8 +363,27 @@ export function parseIncoming(reqBody) {
       for (const msg of value.messages || []) {
         let text = '';
         let audio = null;
+        let image = null;
+        let flow = null;
+        let document = null;
         if (msg.type === 'text') text = msg.text?.body || '';
-        else if (msg.type === 'interactive') {
+        else if (msg.type === 'document' && msg.document?.id) {
+          // ملف (زي جرد إنياد Excel اللي المدير بيبعته)
+          document = {
+            id: msg.document.id,
+            filename: msg.document.filename || '',
+            mimeType: (msg.document.mime_type || '').split(';')[0].trim(),
+          };
+          text = (msg.document.caption || '').trim();
+        }
+        else if (msg.type === 'interactive' && msg.interactive?.type === 'nfm_reply') {
+          // رد فورم WhatsApp Flow (العميل/الموظف ملا الخانات وداس إرسال)
+          try {
+            flow = JSON.parse(msg.interactive.nfm_reply?.response_json || '{}');
+          } catch {
+            flow = {};
+          }
+        } else if (msg.type === 'interactive') {
           text =
             msg.interactive?.button_reply?.title ||
             msg.interactive?.list_reply?.title ||
@@ -250,6 +395,12 @@ export function parseIncoming(reqBody) {
             id: msg.audio.id,
             mimeType: (msg.audio.mime_type || 'audio/ogg').split(';')[0].trim(),
           };
+        } else if (msg.type === 'image' && msg.image?.id) {
+          image = {
+            id: msg.image.id,
+            mimeType: (msg.image.mime_type || 'image/jpeg').split(';')[0].trim(),
+          };
+          text = (msg.image.caption || '').trim(); // لو العميل كتب كلام مع الصورة
         }
 
         out.push({
@@ -258,7 +409,12 @@ export function parseIncoming(reqBody) {
           type: msg.type,
           text: text.trim(),
           audio,
+          image,
+          flow,
+          document,
           name: nameByWaId[msg.from],
+          // لو الموظف عمل "رد" (quote) على رسالة قديمة، ده الـ wamid بتاعها
+          contextId: msg.context?.id || null,
         });
       }
     }

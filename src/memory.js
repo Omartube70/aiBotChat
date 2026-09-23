@@ -100,6 +100,28 @@ export async function setMode(waId, env, mode, ttl = 7200) {
   else modeMem.set(waId, { mode, exp: Date.now() + ttl * 1000 });
 }
 
+/**
+ * ربط معرّف رسالة (wamid) بعميل معيّن — عشان أي موظف يقدر يرد على أي عميل
+ * كان بعت أي وقت، من غير ما يكتب رقمه، بس بعمل "رد" (quote/swipe) على
+ * رسالة العميل اللي وصلته منسوخة (CC) أو التنبيه بتاعها.
+ */
+export async function setReplyTarget(messageId, waId, env, ttl = 7200) {
+  if (!messageId) return;
+  const kv = env?.MEMORY;
+  if (kv) {
+    await kv.put(`replyctx:${messageId}`, waId, { expirationTtl: ttl });
+    return;
+  }
+  lastHandoffMem.set(`replyctx:${messageId}`, waId);
+}
+
+export async function getReplyTarget(messageId, env) {
+  if (!messageId) return null;
+  const kv = env?.MEMORY;
+  if (kv) return (await kv.get(`replyctx:${messageId}`)) || null;
+  return lastHandoffMem.get(`replyctx:${messageId}`) || null;
+}
+
 /** آخر عميل اتحوّل لكل موظف — عشان الموظف يرد من غير ما يكتب الرقم كل مرة. */
 export async function setLastHandoff(agentId, waId, env, ttl = 7200) {
   const kv = env?.MEMORY;
@@ -111,4 +133,62 @@ export async function getLastHandoff(agentId, env) {
   const kv = env?.MEMORY;
   if (kv) return (await kv.get(`lasthandoff:${agentId}`)) || null;
   return lastHandoffMem.get(agentId) || null;
+}
+
+/**
+ * سجل آخر العملاء وآخر الموردين اللي كلّموا البوت — عشان الموظف يقدر يستعرضهم
+ * من واتساب مباشرة (بأمر "العملاء" أو "الموردين"). كل سجل: { id, name, text, at }.
+ * الأحدث أول القائمة، ومحدود العدد عشان ما يكبرش قيمة الـ KV بلا حدود.
+ */
+const LOG_CAP = 100;
+const CUSTOMERS_KEY = 'log:customers';
+const SUPPLIERS_KEY = 'log:suppliers';
+
+async function pushLog(kv, key, entry) {
+  if (!kv) return;
+  const list = (await kv.get(key, 'json')) || [];
+  const filtered = list.filter((e) => e.id !== entry.id);
+  filtered.unshift(entry);
+  await kv.put(key, JSON.stringify(filtered.slice(0, LOG_CAP)));
+}
+
+async function readLog(kv, key, limit) {
+  if (!kv) return [];
+  const list = (await kv.get(key, 'json')) || [];
+  return list.slice(0, limit);
+}
+
+export async function recordCustomer(id, name, text, env) {
+  await pushLog(env?.MEMORY, CUSTOMERS_KEY, { id, name: name || null, text: (text || '').slice(0, 150), at: Date.now() });
+}
+
+export async function recordSupplier(id, name, text, env) {
+  await pushLog(env?.MEMORY, SUPPLIERS_KEY, { id, name: name || null, text: (text || '').slice(0, 150), at: Date.now() });
+}
+
+export async function getCustomerList(env, limit = 20) {
+  return readLog(env?.MEMORY, CUSTOMERS_KEY, limit);
+}
+
+export async function getSupplierList(env, limit = 20) {
+  return readLog(env?.MEMORY, SUPPLIERS_KEY, limit);
+}
+
+/** تشغيل/إيقاف البوت فورًا (أمر بيتبعت من واتساب) — بيتحفظ في KV، من غير حاجة لنشر جديد. */
+let botEnabledMem = true;
+
+export async function isBotEnabled(env) {
+  const kv = env?.MEMORY;
+  if (kv) return (await kv.get('bot:enabled')) !== '0';
+  return botEnabledMem;
+}
+
+export async function setBotEnabled(env, enabled) {
+  const kv = env?.MEMORY;
+  if (kv) {
+    if (enabled) await kv.delete('bot:enabled');
+    else await kv.put('bot:enabled', '0');
+    return;
+  }
+  botEnabledMem = enabled;
 }

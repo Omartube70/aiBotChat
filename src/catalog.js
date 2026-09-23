@@ -1,4 +1,5 @@
 import { config } from './config.js';
+import { getOverrides } from './priceOverrides.js';
 
 /**
  * طبقة الوصول لمنتجات المتجر عبر Inyad Storefront API.
@@ -31,13 +32,21 @@ function normalizeProduct(raw) {
     .map((v) => ({
       name: (v.name || '').trim(),
       price: Number(v.price),
+      cost: Number(v.purchase_cost),
       inStock: inStockOf(v.inventory_status),
+      // IN_STOCK / LOW_STOCK / OUT_OF_STOCK — إنياد مش بيدّي الكمية بالعدد، بس المستوى
+      stock: String(v.inventory_status || '').toUpperCase(),
+      lowAt: Number(v.low_inventory_alert_threshold) || null,
     }))
     .filter((v) => Number.isFinite(v.price));
 
   const prices = variations.map((v) => v.price);
   const minPrice = prices.length ? Math.min(...prices) : null;
   const maxPrice = prices.length ? Math.max(...prices) : null;
+
+  // متوسط سعر الشراء الفعلي (تكلفتنا) — مرجع داخلي للتفاوض مع الموردين، مش بيتقالش لحد
+  const costs = variations.map((v) => v.cost).filter((c) => Number.isFinite(c) && c > 0);
+  const avgCost = costs.length ? Math.round(costs.reduce((a, b) => a + b, 0) / costs.length) : null;
 
   // نعرض قائمة الأنواع فقط لو فيه أكتر من نوع فعلي (أسماء أو أسعار مختلفة)
   const hasRealVariants =
@@ -57,8 +66,19 @@ function normalizeProduct(raw) {
     priceMax: maxPrice,
     currency: config.store.currency,
     inStock: variations.length ? variations.some((v) => v.inStock) : true,
+    // مستوى المخزون للمدير: أحسن مستوى في الأنواع + حد التنبيه ("قليل" = الحد ده أو أقل)
+    stock: variations.some((v) => v.stock === 'IN_STOCK')
+      ? 'IN_STOCK'
+      : variations.some((v) => v.stock === 'LOW_STOCK')
+        ? 'LOW_STOCK'
+        : variations.length
+          ? 'OUT_OF_STOCK'
+          : 'UNKNOWN',
+    lowAt: Math.max(0, ...variations.map((v) => v.lowAt || 0)) || null,
+    stockVariants: variations.map((v) => ({ name: v.name, stock: v.stock, lowAt: v.lowAt })),
     variations: hasRealVariants ? variations : [],
     imageUrl: imgPath ? `${config.store.imageBase}/${imgPath}` : null,
+    ourCost: avgCost,
   };
 }
 
@@ -83,20 +103,33 @@ async function fetchPage(page, keyword) {
   };
 }
 
+/**
+ * بيجيب كل الصفحات. صفحة 0 الأول لوحدها (عشان نعرف total_pages)، والباقي
+ * **بالتوازي** مش تسلسلي — ده كان بيسبب بطء شديد (وأحيانًا timeout لكل الرد)
+ * لما الكاش يبرد على isolate جديد ويحتاج يجيب كل المنتجات.
+ */
 async function fetchAllPages(keyword, hardCap = 40) {
-  const all = [];
-  let page = 0;
-  for (let i = 0; i < hardCap; i++) {
-    const { products, nextPage, totalPages } = await fetchPage(page, keyword);
+  const first = await fetchPage(0, keyword);
+  const all = [...first.products];
+  if (first.products.length === 0) return all;
+
+  if (first.totalPages != null) {
+    const lastPage = Math.min(first.totalPages, hardCap) - 1;
+    if (lastPage >= 1) {
+      const pages = Array.from({ length: lastPage }, (_, i) => i + 1);
+      const results = await Promise.all(pages.map((p) => fetchPage(p, keyword)));
+      for (const r of results) all.push(...r.products);
+    }
+    return all;
+  }
+
+  // مفيش total_pages من الـ API — نمشي تسلسلي عادي على nextPage
+  let page = first.nextPage;
+  for (let i = 1; i < hardCap && page != null; i++) {
+    const { products, nextPage } = await fetchPage(page, keyword);
     all.push(...products);
-    const hasNext =
-      nextPage != null && nextPage !== page
-        ? nextPage
-        : totalPages != null && page + 1 < totalPages
-          ? page + 1
-          : null;
-    if (hasNext == null || products.length === 0) break;
-    page = hasNext;
+    if (products.length === 0) break;
+    page = nextPage;
   }
   return all;
 }
@@ -140,7 +173,7 @@ async function ensureCache() {
 }
 
 /** توحيد النص العربي: harmzat الألف، التاء المربوطة، الياء، التطويل، والتشكيل. */
-function normalizeAr(s) {
+export function normalizeAr(s) {
   return String(s || '')
     .toLowerCase()
     .replace(/[ً-ْـ]/g, '') // تشكيل + تطويل
@@ -227,7 +260,7 @@ function scoreMatch(product, terms) {
  * ثم يرتّبها محلياً على كلمات المستخدم. لو مفيش تطابق حقيقي يرجّع [].
  * @returns {Promise<Array>} أعلى النتائج تطابقاً (مختصرة للموديل)
  */
-export async function searchProducts(query, limit = 8) {
+export async function searchProducts(query, limit = 8, { raw = false } = {}) {
   const q = (query || '').trim();
   if (!q) return [];
 
@@ -245,19 +278,25 @@ export async function searchProducts(query, limit = 8) {
     const s = stripAl(t);
     if (s !== t) queries.push(s);
   }
+  // نستبعد التكرار، وبعدين نبعت كل الاستعلامات بالتوازي (مش تسلسلي) — أسرع بكتير
   const tried = new Set();
-
+  const uniqueQueries = [];
   for (const term of queries) {
     const key = normalizeAr(term);
     if (!key || tried.has(key)) continue;
     tried.add(key);
-    try {
-      const res = await apiSearch(term);
-      for (const p of res) byUuid.set(p.uuid, p);
-    } catch (err) {
-      console.warn(`[catalog] بحث "${term}" فشل:`, err.message);
-    }
+    uniqueQueries.push(term);
   }
+
+  const results = await Promise.all(
+    uniqueQueries.map((term) =>
+      apiSearch(term).catch((err) => {
+        console.warn(`[catalog] بحث "${term}" فشل:`, err.message);
+        return [];
+      }),
+    ),
+  );
+  for (const res of results) for (const p of res) byUuid.set(p.uuid, p);
 
   let pool = [...byUuid.values()];
   const fromApi = pool.length > 0;
@@ -291,33 +330,59 @@ export async function searchProducts(query, limit = 8) {
         ? [...byUuid.values()]
         : [];
 
-  return result.map(compactForModel);
+  // تعديلات السعر اليدوية (لو موظف غيّر سعر بيع/شراء عبر واتساب) بتتطبّق هنا
+  // فوق سعر إنياد — مرة واحدة لكل استدعاء، مش لكل منتج.
+  const overrides = await getOverrides();
+  // raw: بيانات كاملة للمدير (سعر الشراء وحالة المخزون) — مش للموديل ولا للعملاء
+  if (raw) return result.map((p) => ({ ...p, override: overrides[normalizeAr(p.name)] || null }));
+  return result.map((p) => compactForModel(p, overrides[normalizeAr(p.name)]));
 }
 
-function priceLabel(p) {
-  if (p.price == null) return 'السعر غير محدد — اسأل المحل';
-  if (p.priceMax != null && p.priceMax !== p.price) {
-    return `من ${p.price} إلى ${p.priceMax} ${p.currency}`;
+/** ملخص المخزون للمدير: عدد المنتجات، المتاح، والخلصان. */
+export async function stockSummary() {
+  const products = await ensureCache();
+  const out = products.filter((p) => p.stock === 'OUT_OF_STOCK');
+  const low = products.filter((p) => p.stock === 'LOW_STOCK');
+  return {
+    total: products.length,
+    inStock: products.length - out.length - low.length,
+    low: low.length,
+    outOfStock: out.length,
+    outNames: out.map((p) => p.name),
+    lowNames: low.map((p) => `${p.name}${p.lowAt ? ` (${p.lowAt} أو أقل)` : ''}`),
+  };
+}
+
+function priceLabel(price, priceMax, currency) {
+  if (price == null) return 'السعر غير محدد — اسأل المحل';
+  if (priceMax != null && priceMax !== price) {
+    return `من ${price} إلى ${priceMax} ${currency}`;
   }
-  return `${p.price} ${p.currency}`;
+  return `${price} ${currency}`;
 }
 
-function compactForModel(p) {
+// حالة التوفر مش بتتبعت لـ Gemini خالص ولا بتتذكر للعميل — السعر والتفاصيل بس
+// (طلب صاحب المتجر: البوت ميقولش "غير متوفر" حتى لو المخزون صفر)
+function compactForModel(p, override) {
+  // لو فيه سعر بيع معدّل يدويًا، بيبقى سعر ثابت (بيلغي مدى "من...إلى" الأصلي)
+  const price = override?.sale ?? p.price;
+  const priceMax = override?.sale != null ? override.sale : p.priceMax;
+  const ourCost = override?.cost ?? p.ourCost;
   return {
     الاسم: p.name,
-    السعر: priceLabel(p),
-    متوفر: p.inStock ? 'نعم' : 'غير متوفر حالياً',
+    السعر: priceLabel(price, priceMax, p.currency),
     الوصف: p.description || undefined,
     التصنيف: p.category || undefined,
-    الأنواع: p.variations.length
-      ? p.variations.map(
-          (v) => `${v.name}: ${v.price} ${p.currency}${v.inStock ? '' : ' (غير متوفر)'}`,
-        )
-      : undefined,
-    // مفاتيح داخلية — بتتشال قبل الإرسال لـ Gemini
+    الأنواع:
+      p.variations.length && override?.sale == null
+        ? p.variations.map((v) => `${v.name}: ${v.price} ${p.currency}`)
+        : undefined,
+    // تكلفة الشراء الفعلية — مرجع سرّي للموديل لما يفاصل مع مورّد، ممنوع تمامًا يفصح عنه لأي حد
+    تكلفتنا_سرية_للمفاوضة_فقط: ourCost ?? undefined,
+    // مفاتيح داخلية للـ worker بس — بتتشال قبل الإرسال لـ Gemini
     imageUrl: p.imageUrl || undefined,
-    _price: p.price ?? undefined, // أقل سعر رقمي (للفاتورة)
-    _priceMax: p.priceMax ?? undefined,
+    _price: price ?? undefined, // أقل سعر رقمي (للفاتورة)
+    _priceMax: priceMax ?? undefined,
   };
 }
 
