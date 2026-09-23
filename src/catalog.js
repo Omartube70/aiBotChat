@@ -449,6 +449,28 @@ function priceLabel(price, priceMax, currency) {
 
 // حالة التوفر مش بتتبعت لـ Gemini خالص ولا بتتذكر للعميل — السعر والتفاصيل بس
 // (طلب صاحب المتجر: البوت ميقولش "غير متوفر" حتى لو المخزون صفر)
+/**
+ * منتج "يفتح النفس" نقترحه على الزبون من وقت للتاني (إكسسوارات حلوة بسعر معقول وليها صورة)
+ * — زي "إيه رأيك في الأسهم دي؟ سعرها كذا". بيرجع بنفس شكل نتايج البحث + علامة اقتراح.
+ * @param {string[]} excludeNames منتجات موجودة في الرد أصلاً
+ */
+export async function suggestProduct(excludeNames = []) {
+  const all = await ensureCache();
+  const skip = new Set(excludeNames.map(normalizeAr));
+  const picks = all.filter(
+    (p) =>
+      p.imageUrl &&
+      p.price >= 40 &&
+      p.price <= 1500 &&
+      !skip.has(p._n) &&
+      /زرار|اسهم|أسهم|مبين|لمبه|لمبة|فلاش|شاشه|شاشة|جرس|مرايه|مراية|كابينه|كبينه|انتركم|ديكور|ستانلس/.test(p.name),
+  );
+  if (!picks.length) return null;
+  const p = picks[Math.floor(Math.random() * picks.length)];
+  const overrides = await getOverrides();
+  return { ...compactForModel(p, overrides[p._n]), اقتراح_للزبون: true };
+}
+
 function compactForModel(p, override) {
   // لو فيه سعر بيع معدّل يدويًا، بيبقى سعر ثابت (بيلغي مدى "من...إلى" الأصلي)
   const price = override?.sale ?? p.price;
