@@ -202,7 +202,8 @@ export async function handlePayroll(agent, text, env) {
   if (kv0) EMPLOYEES = (await kv0.get(EMPS_KEY, 'json')) || [...DEFAULT_EMPLOYEES];
 
   // "اضافة موظف سعيد 5000" / "حذف موظف سعيد"
-  const addM = s.match(/^(?:اضافه|ضيف|اضف) موظف ([^\d]+?)\s*(\d+(?:\.\d+)?)?$/);
+  let addM = s.match(/^(?:اضافه|ضيف|اضف) موظف ([^\d]+?)\s*(\d+(?:\.\d+)?)?$/);
+  if (addM && addM[1].trim() === 'جديد' && !addM[2]) addM = null; // "اضافة موظف جديد" = حوار الأسئلة تحت
   const delM = s.match(/^(?:حذف|امسح|شيل) موظف (.+)$/);
   if ((addM || delM) && kv0 && config.agent.payroll.includes(agent)) {
     const d = (await kv0.get(KEY, 'json')) || {};
@@ -234,6 +235,33 @@ export async function handlePayroll(agent, text, env) {
   // ---- حوار قبض الراتب: "راتب محمود" → سلف كام؟ → حضور كام؟ → الراتب النهائي ----
   const flowKey = `payroll:flow:${agent}`;
   const bulkKey = `payroll:bulk:${agent}`;
+
+  // ---- إدارة الموظفين بالأسئلة: "موظف جديد" → اسمه؟ → راتبه؟ / "حذف موظف" → مين؟ / "الموظفين" ----
+  if (kv0 && config.agent.payroll.includes(agent)) {
+    if (/^(?:موظف جديد|اضافه موظف|اضافه موظف جديد|ضيف موظف|اضف موظف|زود موظف|عايز اضيف موظف|عاوز اضيف موظف)$/.test(s)) {
+      await kv0.put(flowKey, JSON.stringify({ step: 'addname' }), { expirationTtl: 600 });
+      await sendText(agent, '👤 موظف جديد\nاسمه إيه؟ (أو اكتب: الغاء)');
+      return true;
+    }
+    if (/^(?:حذف|امسح|شيل|مسح) (?:ال)?موظف$/.test(s)) {
+      await kv0.put(flowKey, JSON.stringify({ step: 'delname' }), { expirationTtl: 600 });
+      await sendText(
+        agent,
+        '🗑️ حذف موظف — مين فيهم؟ اكتب اسمه أو رقمه:\n' + EMPLOYEES.map((e, i) => `${i + 1}. ${e}`).join('\n'),
+      );
+      return true;
+    }
+    if (/^(?:ال)?موظفين$|^اسماء (?:ال)?موظفين$|^(?:ال)?موظفين كلهم$/.test(s)) {
+      const d = (await kv0.get(KEY, 'json')) || {};
+      await sendText(
+        agent,
+        `👥 الموظفين (${EMPLOYEES.length}):\n` +
+          EMPLOYEES.map((e, i) => `${i + 1}. ${e} — قيمة القبض: ${d[e]?.base || 0}`).join('\n') +
+          '\n\nلإضافة: موظف جديد | لحذف: حذف موظف | لتعديل القبض: تعديل رواتب',
+      );
+      return true;
+    }
+  }
   if (kv0 && config.agent.payroll.includes(agent)) {
     // "رواتب الموظفين" → كل الرواتب مرة واحدة (اللي متذكرش يتحسب 12 يوم من غير سلف)
     const words = s.split(' ');
@@ -271,6 +299,66 @@ export async function handlePayroll(agent, text, env) {
       if (['الغاء', 'خلاص'].includes(s)) {
         await kv0.delete(flowKey);
         await sendText(agent, 'تمام، لغيت.');
+        return true;
+      }
+      // موظف جديد: الاسم ← الراتب
+      if (flow.step === 'addname') {
+        const name = String(text).replace(/[\d٠-٩]/g, '').trim();
+        if (!name) {
+          await sendText(agent, 'اكتب اسم الموظف (أو: الغاء).');
+          return true;
+        }
+        if (EMPLOYEES.some((e) => norm(e) === norm(name))) {
+          await kv0.delete(flowKey);
+          await sendText(agent, `الموظف ${name} موجود أصلاً 👍 (لو عايز تغيّر راتبه اكتب: تعديل رواتب)`);
+          return true;
+        }
+        await kv0.put(flowKey, JSON.stringify({ step: 'addbase', name }), { expirationTtl: 600 });
+        await sendText(agent, `👤 ${name}\nقيمة القبض بتاعته كام؟ (اكتب 0 لو لسه مش محددة)`);
+        return true;
+      }
+      if (flow.step === 'addbase') {
+        if (!numOnly) {
+          await sendText(agent, `اكتب قيمة القبض بالأرقام بس (مثلاً 6000) — أو: الغاء`);
+          return true;
+        }
+        const d = (await kv0.get(KEY, 'json')) || {};
+        EMPLOYEES.push(flow.name);
+        d[flow.name] = { base: Number(numOnly[1]), att: 0, adv: 0 };
+        await kv0.put(EMPS_KEY, JSON.stringify(EMPLOYEES));
+        await kv0.put(KEY, JSON.stringify(d));
+        await kv0.delete(flowKey);
+        await sendText(
+          agent,
+          `✅ اتضاف الموظف ${flow.name} بقيمة قبض ${numOnly[1]} (قيمة اليوم ${fmt(Number(numOnly[1]) / DAYS)}).\n` +
+            `عدد الموظفين دلوقتي: ${EMPLOYEES.length}`,
+        );
+        return true;
+      }
+      // حذف موظف: بالاسم أو برقمه في القايمة
+      if (flow.step === 'delname') {
+        const idx = numOnly ? Number(numOnly[1]) - 1 : -1;
+        const tokens = s.split(' ');
+        const cands =
+          idx >= 0 && EMPLOYEES[idx]
+            ? [EMPLOYEES[idx]]
+            : EMPLOYEES.filter((e) => norm(e) === s || norm(e).split(' ').some((w) => tokens.includes(w)));
+        if (cands.length !== 1) {
+          await sendText(
+            agent,
+            (cands.length ? 'فيه أكتر من موظف بالاسم ده، ابعت رقمه:\n' : 'مش لاقي الاسم ده، ابعت رقمه من القايمة:\n') +
+              EMPLOYEES.map((e, i) => `${i + 1}. ${e}`).join('\n'),
+          );
+          return true;
+        }
+        const e = cands[0];
+        const d = (await kv0.get(KEY, 'json')) || {};
+        EMPLOYEES = EMPLOYEES.filter((x) => x !== e);
+        delete d[e];
+        await kv0.put(EMPS_KEY, JSON.stringify(EMPLOYEES));
+        await kv0.put(KEY, JSON.stringify(d));
+        await kv0.delete(flowKey);
+        await sendText(agent, `✅ اتحذف الموظف ${e}. عدد الموظفين دلوقتي: ${EMPLOYEES.length}`);
         return true;
       }
       // تعديل قيمة القبض: اسم الموظف ← القيمة الجديدة
