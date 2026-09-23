@@ -358,8 +358,37 @@ export default {
         .then((count) => console.log(`[contacts-sync] تمت المزامنة: ${count} اسم`))
         .catch((err) => console.error('[contacts-sync] خطأ:', err.message)),
     );
+    ctx.waitUntil(remindStaffWindow(env).catch((err) => console.error('[remind] خطأ:', err.message)));
   },
 };
+
+/* ---------- تذكير أرقام الموظفين قبل ما نافذة الـ 24 ساعة تقفل ---------- */
+// واتساب مش بيسمح للبوت يبعت لرقم ماكلّمهوش آخر 24 ساعة (code 131047) — فنسخ رسايل
+// الزباين بتقف. قبل ما المدة تخلص بساعتين بنفكّر الموظف يرد بأي كلمة عشان تتجدد.
+const lastInKey = (n) => `staff:lastin:${n}`;
+const remindKey = (n) => `staff:reminded:${n}`;
+const HOUR = 3600 * 1000;
+const REMIND_TEXT =
+  '⏰ رد بأي كلمة (زي: تمام) عشان نسخ رسايل الزباين تفضل توصلك 24 ساعة كمان.\n' +
+  'لو مارديتش، واتساب هيوقف النسخ لحد ما تبعت أي رسالة.';
+
+/** بيتنده من الـ cron كل نص ساعة. */
+async function remindStaffWindow(env) {
+  const kv = env?.MEMORY;
+  if (!kv) return;
+  for (const n of config.agent.ccNumbers) {
+    const last = Number(await kv.get(lastInKey(n)));
+    if (!last) continue;
+    const age = Date.now() - last;
+    // بين 21.5 و 23.5 ساعة — الـ cron كل 30 دقيقة فبيقع مرة جوه الفترة دي
+    if (age < 21.5 * HOUR || age > 23.5 * HOUR) continue;
+    if ((await kv.get(remindKey(n))) === String(last)) continue; // اتفكّر خلاص للمدة دي
+    if (await sendText(n, REMIND_TEXT)) {
+      await kv.put(remindKey(n), String(last), { expirationTtl: 2 * 24 * 3600 });
+      console.log(`[remind] ${n}`);
+    }
+  }
+}
 
 const MAX_AUDIO_BYTES = 3 * 1024 * 1024; // فوق كده تفريغ الـ base64 ممكن يعدّي حد الـ CPU
 const MAX_IMAGE_BYTES = 4 * 1024 * 1024;
@@ -446,6 +475,11 @@ async function handleMessage(msg, env) {
   const { from, id, type } = msg;
   let text = msg.text;
   if (!from) return;
+
+  // أي رسالة من رقم متابعة بتجدد نافذة الـ 24 ساعة → نسجّل وقتها للتذكير
+  if (config.agent.ccNumbers.includes(from)) {
+    await env.MEMORY?.put(lastInKey(from), String(Date.now()), { expirationTtl: 3 * 24 * 3600 });
+  }
 
   // رد فورم (WhatsApp Flow): عميل ملا بيانات عرض التركيب، أو موظف كتب السعر
   if (msg.flow) {
@@ -940,6 +974,13 @@ async function handleAgentMessage(agent, text, env, contextId) {
 
   // تشغيل/إيقاف البوت فورًا من واتساب — بيتحكم فيه أي رقم موظف
   console.log(`[staff ${agent}] ${t}${contextId ? ' (رد على رسالة)' : ''}`);
+
+  // رد على تذكير الـ 24 ساعة ("تمام"، "ok"...) → تأكيد قصير بدل ما البوت يعتبره سؤال
+  if (/^(تمام|تم|ok|okay|اوك|أوك|ماشي|حاضر|👍|✅)$/i.test(t) && (await env.MEMORY?.get(remindKey(agent)))) {
+    await env.MEMORY.delete(remindKey(agent));
+    await sendText(agent, '✅ تمام، النسخ هتفضل توصلك 24 ساعة كمان.');
+    return;
+  }
 
   // "اعمل عرض" → البوت يسأل المدير نفس الأسئلة الست + السعر ويطلّع العرض (أول حاجة،
   // عشان إجابات زي "12" أو "500000" ما تتفهمش أوامر تانية)
