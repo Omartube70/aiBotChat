@@ -74,7 +74,7 @@ import { normalizeAr } from './catalog.js';
 import { handlePayroll } from './payroll.js';
 import { handleStaffCalc } from './calc.js';
 import { directionsReply } from './directions.js';
-import { readSheet, detectKind, parseSales, parseAccounts, saveSales, saveAccounts, parsePeriod, salesReport, accountLookup, topBalances } from './shopdata.js';
+import { readSheet, detectKind, parseSales, parseAccounts, saveSales, saveAccounts, parsePeriod, salesReport, accountLookup, topBalances, debtAnalysis } from './shopdata.js';
 import {
   OFFER_LABELS,
   mergeOffer,
@@ -2168,6 +2168,30 @@ async function handleShopDataQuery(agent, t, env) {
   if (salesWord || (profitWord && period)) {
     const p = period || parsePeriod('النهارده');
     await sendText(agent, await salesReport(env, p, /فواتير|الفواتير/.test(s) ? 'list' : 'summary'));
+    return true;
+  }
+  // "حلل الديون" / "لينا وعلينا" / "نعمل ايه في الديون" → الصورة بالأرقام + أفكار من المساعد
+  if (/(?:حلل|تحليل|افكار|فكره|نعمل ايه|اعمل ايه|نتصرف|خطه|نحصل|تحصيل).{0,15}(?:ديون|الديون|مديونيات|الفلوس اللي بره|الاجل|الحسابات)|لينا وعلينا|لنا وعلينا|علينا ولينا/.test(s)) {
+    const a = await debtAnalysis(env);
+    if (!a) {
+      await sendText(agent, 'لسه مفيش ملف حسابات عندي. ابعتلي ملف "العملاء" و"الموردين" Excel من إنياد.');
+      return true;
+    }
+    await sendText(agent, a.text);
+    const ask =
+      `دي أرقام الديون بتاعة المحل (من ملفات إنياد):\n${a.facts}\n\n` +
+      `${t}\n\nحلّلها كمدير مالي شاطر بيكلم صاحب المحل بالمصري: إيه أخطر حاجة في الأرقام دي، وادّيني 5-7 أفكار عملية ومحددة بالأسماء والأرقام ` +
+      '(مين نحصّل منه الأول وإزاي، نتعامل إزاي مع الديون النايمة، نقلل الآجل إزاي من غير ما نخسر الزباين، وإزاي ننظّم الدفع للموردين). ' +
+      'لو فيه حساب شكله داخلي (زي اسم فيه "توب باور") نبّه إنه ممكن يكون حساب داخلي مش زبون. من غير مقدمات، ونقط قصيرة.';
+    const history = await getHistory(agent, env);
+    try {
+      const rules = (await env.MEMORY.get(rulesKey(agent), 'json')) || [];
+      const out = await staffChat(ask, history, { isManager: [config.agent.manager, DEBUG_MANAGER].includes(agent), rules });
+      await saveHistory(agent, out.history, env);
+      if (out.reply) await sendText(agent, `💡 أفكار:\n${out.reply}`);
+    } catch (err) {
+      console.error('[debt-ideas]', err.message);
+    }
     return true;
   }
   if (/^(?:ال)?موردين$|حساب(?:ات)? (?:ال)?موردين|(?:ال)?موردين (?:ليهم|لهم|عليهم)|علينا (?:للموردين|كام)/.test(s)) {

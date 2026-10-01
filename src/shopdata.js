@@ -375,3 +375,88 @@ export async function topBalances(env, kind) {
   }
   return lines.join('\n').slice(0, 4000);
 }
+
+/* ---------- تحليل الديون (لينا وعلينا) ---------- */
+
+/** "14 أبريل 2026" → عدد الأيام من ساعتها (أو null). */
+function daysSince(s, today) {
+  const d = isoDate(s);
+  return d ? Math.round((new Date(`${today}T00:00:00Z`) - new Date(`${d}T00:00:00Z`)) / DAY) : null;
+}
+
+/**
+ * صورة الديون بالأرقام: اللي لينا (بأعمار الديون)، اللي علينا، والبيع الآجل الأخير.
+ * @returns {Promise<{text:string, facts:string}|null>} text = للمدير، facts = للمساعد عشان يدّي أفكار
+ */
+export async function debtAnalysis(env) {
+  const cus = await env.MEMORY.get('acct:customers', 'json');
+  const sup = await env.MEMORY.get('acct:suppliers', 'json');
+  if (!cus && !sup) return null;
+  const today = cairoToday();
+  const L = [];
+  const F = [];
+
+  let recv = 0;
+  if (cus) {
+    const owe = cus.list
+      .map((a) => ({ ...a, net: a.gave - a.took, days: daysSince(a.last, today) }))
+      .filter((a) => a.net > 0)
+      .sort((a, b) => b.net - a.net);
+    recv = owe.reduce((s, a) => s + a.net, 0);
+    const prepaid = cus.list.filter((a) => a.took > a.gave).reduce((s, a) => s + (a.took - a.gave), 0);
+    const bucket = (lo, hi) => owe.filter((a) => a.days != null && a.days >= lo && a.days < hi);
+    const groups = [
+      ['🟢 اتعاملوا آخر شهر', bucket(0, 30)],
+      ['🟡 من 1 لـ 3 شهور', bucket(30, 90)],
+      ['🟠 من 3 لـ 6 شهور', bucket(90, 180)],
+      ['🔴 أكتر من 6 شهور (ديون نايمة)', bucket(180, 1e9)],
+      ['⚪ من غير تاريخ تعامل', owe.filter((a) => a.days == null)],
+    ];
+    const sum = (arr) => arr.reduce((s, a) => s + a.net, 0);
+    const top5 = sum(owe.slice(0, 5));
+    L.push(`💰 *لينا بره: ${fmt(recv)} ج.م* عند ${owe.length} عميل`);
+    for (const [label, arr] of groups) if (arr.length) L.push(`${label}: ${fmt(sum(arr))} (${arr.length} عميل)`);
+    L.push(`أكبر 5 عملاء شايلين ${Math.round((top5 / recv) * 100)}% من الديون.`);
+    if (prepaid) L.push(`عملاء دافعين مقدم (ليهم عندنا): ${fmt(prepaid)} ج.م`);
+    const old = bucket(180, 1e9).slice(0, 6);
+    if (old.length) L.push('', '🔴 أكبر ديون نايمة:', ...old.map((a) => `• ${a.name}: ${fmt(a.net)} — آخر تعامل من ${Math.round(a.days / 30)} شهر`));
+    F.push(
+      `إجمالي لينا عند العملاء ${fmt(recv)} عند ${owe.length} عميل. أكبر 5 = ${Math.round((top5 / recv) * 100)}%.`,
+      ...groups.map(([l, arr]) => `${l}: ${fmt(sum(arr))} (${arr.length})`),
+      `أكبر 10 مدينين: ${owe.slice(0, 10).map((a) => `${a.name} ${fmt(a.net)}${a.days != null ? ` (آخر تعامل من ${a.days} يوم، اشترى إجمالي ${fmt(a.buys)})` : ' (من غير تاريخ)'}`).join('؛ ')}`,
+      `ديون صغيرة أقل من 1000: ${owe.filter((a) => a.net < 1000).length} عميل بإجمالي ${fmt(sum(owe.filter((a) => a.net < 1000)))}.`,
+    );
+  }
+  let pay = 0;
+  if (sup) {
+    const owed = sup.list.map((a) => ({ ...a, net: a.took - a.gave })).filter((a) => a.net > 0).sort((a, b) => b.net - a.net);
+    pay = owed.reduce((s, a) => s + a.net, 0);
+    L.push('', `🏭 *علينا للموردين: ${fmt(pay)} ج.م* لـ ${owed.length} مورد`);
+    if (owed[0]) L.push(`أكبرهم ${owed[0].name}: ${fmt(owed[0].net)} (${Math.round((owed[0].net / pay) * 100)}%)`);
+    F.push(`علينا للموردين ${fmt(pay)}: ${owed.slice(0, 6).map((a) => `${a.name} ${fmt(a.net)}`).join('؛ ')}.`);
+  }
+  if (cus && sup) {
+    const net = recv - pay;
+    L.push('', net >= 0 ? `⚖️ الصافي: لينا أكتر من علينا بـ ${fmt(net)} ج.م` : `⚖️ الصافي: علينا أكتر من لينا بـ ${fmt(-net)} ج.م`);
+    F.push(`الصافي (لينا - علينا) = ${fmt(net)}.`);
+  }
+  // البيع الآجل في آخر 30 يوم من ملف المبيعات
+  const ts = await ticketsIn(env, addDays(today, -30), today);
+  if (ts.length) {
+    const credit = ts.filter((t) => /آجل/.test(t.pay));
+    const all = ts.reduce((s, t) => s + t.total, 0);
+    const cr = credit.reduce((s, t) => s + t.total, 0);
+    const byC = new Map();
+    for (const t of credit) byC.set(t.customer || '—', (byC.get(t.customer || '—') || 0) + t.total);
+    L.push('', `🧾 آخر 30 يوم (من الملفات): ${Math.round((cr / all) * 100)}% من المبيعات آجل (${fmt(cr)} من ${fmt(all)})`);
+    F.push(
+      `آخر 30 يوم: مبيعات ${fmt(all)}، منها آجل ${fmt(cr)} (${Math.round((cr / all) * 100)}%). أكبر الشاريين آجل: ` +
+        [...byC.entries()].sort((a, b) => b[1] - a[1]).slice(0, 6).map(([k, v]) => `${k} ${fmt(v)}`).join('؛ '),
+    );
+  }
+  const date = cus?.at || sup?.at;
+  return {
+    text: `📒 *لينا وعلينا* (ملف ${new Date(date).toLocaleDateString('ar-EG')}):\n\n${L.join('\n')}`.slice(0, 3500),
+    facts: F.join('\n'),
+  };
+}
