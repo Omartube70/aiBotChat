@@ -165,6 +165,8 @@ export async function handleStaffCalc(agent, text, env) {
 
   const m = t.match(/^(?:احسب|اعمل)(?:\s*لي|لى|ي)?(?:\s+فاتور[هة])?[\s:،-]+([\s\S]+)$/);
   if (!m) return false;
+  // فاتورة = أعداد ومنتجات ("احسبلي 3 طرمبة"). "اعملي بوست" / "احسبلي الزكاة" → للمساعد الحر
+  if (!/فاتور/.test(t) && (!/\d/.test(m[1]) || /زكا|ضريب|فايد|فائد|قسط|نسب|%|عمر|مساف|بوست|منشور|رسال/.test(m[1]))) return false;
   const items = splitItems(m[1]);
   if (!items.length) {
     await sendText(agent, 'ابعت الأصناف والكميات بعد الكلمة، مثال:\nاحسبلي 3 طرمبة IT تركي، 5 قاعدة طرمبة');

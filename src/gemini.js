@@ -654,6 +654,8 @@ export async function interpretStaffCommand(text, customers, quotes) {
     `"هند مرتبها بقى 7000" / "خلي قبض هند 7000" → هند بياخد 7000 | "سعيد أخد سلفة 500" → سعيد سلف 500 | "علاء حضر 10 أيام" → علاء حضور 10\n` +
     `- لو بيسأل على حساب/فلوس/مديونية عميل أو مورّد ("محمد عليه كام"، "لينا عند سعيد كام"، "حساب المورد فلان"): {"action":"balance","who":"<الاسم>","kind":"customer أو supplier"}\n` +
     `- أي كلام تاني (سلام، سؤال عام، دردشة): {"action":"chat"}\n` +
+    `- **أي طلب مش عن المحل** (أخبار، دولار/دهب، معلومة، نصيحة، ترجمة، حساب عادي، "اكتبلي رسالة/بوست/تهنئة" لحد مش زبون، "دوّرلي على"...): {"action":"chat"}\n` +
+    `  "اكتبلي" / "ألّفلي" / "صيغلي" = هو عايزك تكتبهاله هو (chat)، مش تبعتها لزبون. ومتختارش product_price إلا لو المنتج قطعة غيار مصاعد.\n` +
     `- لو أمر لزبون أو عرض بس مش متأكد مين: {"action":"none"}`;
   const res = await fetch(endpointFor(config.gemini.model), {
     method: 'POST',
@@ -675,32 +677,102 @@ export async function interpretStaffCommand(text, customers, quotes) {
   }
 }
 
-const STAFF_PROMPT = `إنت مساعد شاطر وموظف أمين عند صاحب محل "${S.name}" (قطع غيار مصاعد) وشركة "توب باور" (تركيب وصيانة مصاعد).
-اللي بيكلمك دلوقتي صاحب المحل أو واحد من موظفينه — مش زبون.
-- **ممنوع تعامله كزبون**: متسألوش "محتاج قطع غيار إيه" ولا تعرض عليه بضاعة ولا تقوله "أهلاً بيك في المحل".
-- رد زي موظف بيكلم مديره: قصير، عملي، بالعامية المصرية، ومحترم ("تحت أمرك"، "حاضر"، "تمام يا فندم").
-- لو بيسلّم أو بيدردش: رد بلطف واسأله "تحب أعملك إيه؟".
-- قوله إنك تقدر: تجيب سعر البيع والشراء لأي منتج، تعمل فاتورة، تعمل عرض سعر تركيب، تحسب الرواتب، تبعت رسالة لزبون، تحط سعر لعرض عميل — لو سأل تقدر تعمل إيه.
-- ممنوع تخترع أرقام أو أسعار أو بيانات.`;
+const staffPrompt = (isManager) => `إنت المساعد الذكي الشخصي والتنفيذي لـ${isManager ? '"الحاج محمد" صاحب' : 'واحد من موظفين'} محل "${S.name}" (قطع غيار مصاعد) وشركة "توب باور" (تركيب وصيانة مصاعد).
+النهارده ${new Date().toLocaleDateString('ar-EG', { timeZone: 'Africa/Cairo', weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' })}.
+اللي بيكلمك ده صاحبك ومديرك — مش زبون. إنت زي ChatGPT بالظبط بس خاص بيه وبتتكلم مصري.
 
-/** رد "موظف" لصاحب المحل (مش رد بيّاع لزبون). */
-export async function staffChat(text, history = []) {
-  const res = await fetch(endpointFor(config.gemini.model), {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    signal: AbortSignal.timeout(15000),
-    body: JSON.stringify({
-      systemInstruction: { parts: [{ text: STAFF_PROMPT }] },
-      contents: [...history, { role: 'user', parts: [{ text }] }],
-      generationConfig: { temperature: 0.5, maxOutputTokens: 600, ...fast() },
-    }),
-  });
-  if (!res.ok) throw new Error(`staffChat ${res.status}`);
-  const data = await res.json();
-  const reply = (data.candidates?.[0]?.content?.parts || []).map((p) => p.text).filter(Boolean).join('\n').trim();
+**إنت مساعد حر في أي حاجة، مش في الشغل بس:**
+- أي طلب بره الشغل تنفّذه على طول وبشطارة: أسئلة عامة، أخبار، سعر الدولار والدهب والعملات، ماتشات، طقس، دين، صحة، قانون، عربيات، سفر،
+  حسابات ورياضيات، نصايح، تخطيط، كتابة رسايل وبوستات وتهاني ومعايدات وشكاوى وجوابات رسمية، ترجمة، تلخيص، أفكار، هزار ودردشة — أي حاجة.
+- **ممنوع تقول** "أنا مساعد المحل بس" أو "ده بره تخصصي" أو "مقدرش" لأي طلب عادي. نفّذ الطلب نفسه، مش تشرح هتعمله إزاي.
+- لو طلب يكتبله حاجة (رسالة، بوست، كلام لحد): اكتبها كاملة جاهزة ينسخها على طول.
+- المعلومات اللي بتتغير (أسعار، أخبار، نتايج، مواعيد): دوّر على النت وقول الرقم والتاريخ بتاعه.
+- نفّذ على طول من غير أسئلة: لو فيه تفصيلة ناقصة (زي بوست من غير منتج معيّن) اكتب أحسن نسخة عامة جاهزة، وفي الآخر سطر "لو عايز أزوّد كذا قولّي".
+- نفّذ "القواعد" اللي بيقولهالك في الكلام ("من هنا ورايح..."، "لما أقولك كذا اعمل كذا") وافتكرها طول المحادثة.
+
+**الأسلوب:** عامية مصرية، محترم وودود (${isManager ? '"يا حاج"، "تحت أمرك"' : '"تحت أمرك"، "حاضر"'})، مباشر من غير مقدمات ولا لف ودوران.
+الرد مناسب للطلب: سؤال بسيط = سطر أو اتنين، طلب كبير = رد كامل. ده واتساب: من غير markdown تقيل (لا # ولا جداول)، ونجمة واحدة *كده* للتقيل.
+
+**شغل المحل:** لو سأل تقدر تعمل إيه في الشغل: سعر البيع والشراء لأي منتج، فاتورة، عرض سعر تركيب، الرواتب، رسالة لزبون، سعر لعرض عميل.
+أسعار منتجات المحل وبيانات الزباين ماتخترعهاش أبدًا (دي بتيجي من النظام) — لو مش قدامك قوله يكتب "سعر <اسم المنتج>".`;
+
+function partsText(data) {
+  return (data.candidates?.[0]?.content?.parts || [])
+    .filter((p) => p.text && !p.thought)
+    .map((p) => p.text)
+    .join('')
+    .trim();
+}
+
+/**
+ * المساعد الشخصي الحر لصاحب المحل والموظفين (أي طلب، جوه الشغل أو براه).
+ * موديل أذكى (flash) ببحث جوجل للمعلومات الجديدة، ولو اتأخر/فشل → flash-lite من غير بحث.
+ */
+export async function staffChat(text, history = [], { isManager = false, rules = [] } = {}) {
+  const contents = [...history, { role: 'user', parts: [{ text }] }];
+  const prompt =
+    staffPrompt(isManager) +
+    (rules.length ? `\n\n**قواعد هو قالهالك قبل كده — نفّذها دايمًا بالظبط:**\n${rules.map((x) => `- ${x}`).join('\n')}` : '');
+  const base = {
+    systemInstruction: { parts: [{ text: prompt }] },
+    contents,
+    safetySettings: ['HARM_CATEGORY_HARASSMENT', 'HARM_CATEGORY_HATE_SPEECH', 'HARM_CATEGORY_SEXUALLY_EXPLICIT', 'HARM_CATEGORY_DANGEROUS_CONTENT'].map(
+      (category) => ({ category, threshold: 'BLOCK_ONLY_HIGH' }),
+    ),
+  };
+  // من غير بحث (مفتاح Gemini المجاني مابيدّيش بحث جوجل): ممنوع يألّف أرقام أو أخبار النهارده
+  const offline = {
+    ...base,
+    contents: [
+      ...history,
+      { role: 'user', parts: [{ text: `${text}\n\n[ملحوظة من النظام: مفيش نت دلوقتي — أي سعر أو خبر أو نتيجة بتاعة النهارده ماتقولهاش كأنها أكيدة]` }] },
+    ],
+    systemInstruction: {
+      parts: [
+        {
+          text:
+            prompt +
+            '\n\n**مهم جدًا:** إنت دلوقتي مش متوصل بالنت. أي حاجة بتتغير (سعر الدولار/الدهب النهارده، أخبار، نتايج ماتشات، الطقس، مواعيد) ' +
+            'ماتقولش فيها رقم أو نتيجة كأنها أكيدة. قول بصراحة "معنديش نت دلوقتي أجيب الرقم اللحظي" وادّيه آخر معلومة تعرفها لو مفيدة وقول إنها قديمة. ' +
+            'باقي الطلبات (كتابة، ترجمة، حسابات، نصايح، معلومات ثابتة) نفّذها عادي وكاملة.',
+        },
+      ],
+    },
+  };
+  const searchGen = { temperature: 0.6, maxOutputTokens: 3000 };
+  const attempts = [
+    // بالبحث الأول (بيشتغل لو اتفعّل الدفع على مفتاح Gemini) — لو 429 بيرجع في أقل من ثانية
+    { model: 'gemini-flash-latest', timeout: 22000, body: { ...base, tools: [{ google_search: {} }], generationConfig: searchGen } },
+    { model: config.gemini.model, timeout: 15000, body: { ...base, tools: [{ google_search: {} }], generationConfig: searchGen } },
+    {
+      model: 'gemini-flash-latest',
+      timeout: 13000,
+      body: { ...offline, generationConfig: { temperature: 0.6, maxOutputTokens: 3000, thinkingConfig: { thinkingLevel: 'low' } } },
+    },
+    { model: config.gemini.model, timeout: 12000, body: { ...offline, generationConfig: { temperature: 0.6, maxOutputTokens: 2000, ...fast() } } },
+  ];
+  let reply = '';
+  let lastErr;
+  for (const a of attempts) {
+    try {
+      const res = await fetch(endpointFor(a.model), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        signal: AbortSignal.timeout(a.timeout),
+        body: JSON.stringify(a.body),
+      });
+      if (!res.ok) throw new Error(`staffChat ${a.model} ${res.status}: ${(await res.text().catch(() => '')).slice(0, 150)}`);
+      reply = partsText(await res.json());
+      if (reply) break;
+    } catch (err) {
+      lastErr = err;
+      console.warn('[staffChat]', err.message);
+    }
+  }
+  if (!reply && lastErr) throw lastErr;
   return {
     reply,
-    history: [...history, { role: 'user', parts: [{ text }] }, { role: 'model', parts: [{ text: reply }] }].slice(-12),
+    history: [...contents, { role: 'model', parts: [{ text: reply }] }].slice(-20),
   };
 }
 

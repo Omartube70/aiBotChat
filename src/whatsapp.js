@@ -3,6 +3,10 @@ import { logErr } from './diag.js';
 
 const W = config.whatsapp;
 
+// تجربة (/debug/staff): الرسايل لـ "dbg..." بتتجمّع هنا بدل ما تتبعت على واتساب
+export const debugOutbox = [];
+const dbg = (to, item) => (String(to).startsWith('dbg') ? (debugOutbox.push(item), 'dbg') : null);
+
 function graphUrl(path) {
   return `https://graph.facebook.com/${W.graphVersion}/${path}`;
 }
@@ -13,6 +17,7 @@ function graphUrl(path) {
  *   عمل "رد" (quote) على الرسالة دي نقدر نربطها برقم العميل الأصلي.
  */
 export async function sendText(to, body) {
+  if (dbg(to, { sendText: body })) return 'dbg';
   if (!W.token || !W.phoneNumberId) {
     console.warn('[whatsapp] التوكن أو Phone Number ID ناقص — مش هيتبعت حاجة');
     return null;
@@ -48,6 +53,7 @@ export async function sendText(to, body) {
 
 /** إرسال ملف (مستند) بـ media id مرفوع. */
 export async function sendDocument(to, mediaId, filename, caption) {
+  if (dbg(to, { sendDocument: true })) return 'dbg';
   if (!W.token || !W.phoneNumberId || !mediaId) return false;
   const res = await fetch(graphUrl(`${W.phoneNumberId}/messages`), {
     method: 'POST',
@@ -115,6 +121,7 @@ function jpegLink(link) {
 
 /** إرسال صورة: صور المنتجات بتتحوّل JPEG، وأي صورة تانية بنرفعها بنوعها الصح (ولو فشل بنبعت الرابط). */
 export async function sendImage(to, link, caption) {
+  if (dbg(to, { sendImage: true })) return 'dbg';
   if (!W.token || !W.phoneNumberId || !link) return false;
   const converted = jpegLink(link);
   if (converted) link = converted;
@@ -146,6 +153,7 @@ export async function sendImage(to, link, caption) {
 
 /** إرسال نقطة موقع (pin على الخريطة). */
 export async function sendLocation(to, { lat, lng, name, address }) {
+  if (dbg(to, { sendLocation: true })) return 'dbg';
   if (!W.token || !W.phoneNumberId || lat == null || lng == null) return false;
   const res = await fetch(graphUrl(`${W.phoneNumberId}/messages`), {
     method: 'POST',
@@ -179,6 +187,7 @@ export async function sendLocation(to, { lat, lng, name, address }) {
  * @param {{name: string, phone: string, address?: string, note?: string}} c phone بصيغة دولية (2010...)
  */
 export async function sendContact(to, { name, phone, address, note }) {
+  if (dbg(to, { sendContact: true })) return 'dbg';
   if (!W.token || !W.phoneNumberId || !phone) return false;
   const res = await fetch(graphUrl(`${W.phoneNumberId}/messages`), {
     method: 'POST',
@@ -214,6 +223,7 @@ export async function sendContact(to, { name, phone, address, note }) {
  * @param {Array<{id: string, title: string}>} buttons العنوان لحد 20 حرف
  */
 export async function sendButtons(to, body, buttons) {
+  if (dbg(to, { sendButtons: true })) return 'dbg';
   if (!W.token || !W.phoneNumberId) return false;
   const res = await fetch(graphUrl(`${W.phoneNumberId}/messages`), {
     method: 'POST',
@@ -251,6 +261,7 @@ export async function sendButtons(to, body, buttons) {
  * @param {{flowId: string, flowToken: string, screen: string, body: string, cta: string, header?: string}} f
  */
 export async function sendFlow(to, { flowId, flowToken, screen, body, cta, header }) {
+  if (dbg(to, { sendFlow: true })) return 'dbg';
   if (!W.token || !W.phoneNumberId || !flowId) return false;
   const res = await fetch(graphUrl(`${W.phoneNumberId}/messages`), {
     method: 'POST',
@@ -313,6 +324,7 @@ export async function uploadMedia(buffer, mimeType = 'audio/ogg', filename = 're
 
 /** إرسال رسالة صوتية بـ media id مرفوع. */
 export async function sendAudio(to, mediaId) {
+  if (dbg(to, { sendAudio: true })) return 'dbg';
   if (!W.token || !W.phoneNumberId || !mediaId) return false;
   const res = await fetch(graphUrl(`${W.phoneNumberId}/messages`), {
     method: 'POST',

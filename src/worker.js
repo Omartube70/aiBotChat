@@ -34,7 +34,11 @@ import {
   sendContact,
   sendFlow,
   sendButtons,
+  debugOutbox,
 } from './whatsapp.js';
+
+// رقم وهمي للتجربة (/debug/staff) — بيتعامل زي المدير والرسايل ليه مش بتتبعت
+const DEBUG_MANAGER = 'dbg-manager';
 import { setupFlows, getFlowIds, MACHINE_TITLES } from './flows.js';
 import { withD1 } from './d1kv.js';
 import { parseInventoryXlsx, saveInventory, getInventory, findQty, inventoryTotals } from './inventory.js';
@@ -176,6 +180,44 @@ export default {
       } catch (err) {
         return Response.json({ error: err.message }, { status: 500 });
       }
+    }
+
+    // تجربة رسايل المدير بنفس مسار واتساب بالظبط — الردود بترجع هنا ومش بتتبعت لحد
+    //   GET /debug/staff?text=سعر الدولار النهارده
+    if (pathname === '/debug/staff' && env.ENABLE_DEBUG_CHAT === '1') {
+      const text = url.searchParams.get('text') || '';
+      if (!text) return Response.json({ error: 'ابعت ?text=رسالتك' }, { status: 400 });
+      if (!config.agent.admins.includes(DEBUG_MANAGER)) config.agent.admins.push(DEBUG_MANAGER);
+      debugOutbox.length = 0;
+      if (url.searchParams.get('reset')) await resetHistory(DEBUG_MANAGER, env);
+      if (url.searchParams.get('hist')) return Response.json(await getHistory(DEBUG_MANAGER, env));
+      if (url.searchParams.get('probe')) {
+        const res = [];
+        for (const m of url.searchParams.get('probe').split(',')) {
+          const t0 = Date.now();
+          const r = await fetch(`${config.gemini.baseUrl}/models/${m}:generateContent?key=${config.gemini.apiKey}`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ contents: [{ role: 'user', parts: [{ text }] }], tools: [{ google_search: {} }] }),
+          });
+          const j = await r.json().catch(() => ({}));
+          res.push({
+            m,
+            status: r.status,
+            ms: Date.now() - t0,
+            searched: !!j.candidates?.[0]?.groundingMetadata?.webSearchQueries,
+            text: ((j.candidates?.[0]?.content?.parts || []).filter((p) => !p.thought).map((p) => p.text).join('') || j.error?.message || '').slice(0, 200),
+          });
+        }
+        return Response.json(res);
+      }
+      const t0 = Date.now();
+      try {
+        await handleAgentMessage(DEBUG_MANAGER, text, env);
+      } catch (err) {
+        debugOutbox.push({ error: err.message });
+      }
+      return Response.json({ ms: Date.now() - t0, out: [...debugOutbox] });
     }
 
     // اختبار إن الحالة بتتقري فورًا بعد الكتابة (D1) + إن بيانات KV القديمة لسه بتتقري
@@ -1273,6 +1315,7 @@ async function handleAgentMessage(agent, text, env, contextId) {
 
 /* ---------- الموظف بيكلّم البوت زي ما بيكلّم موظف (كتابة أو فويس، بـ"يا بوت" أو من غيرها) ---------- */
 const staffPickKey = (a) => `staffpick:${a}`;
+const rulesKey = (a) => `staff:rules:${a}`;
 
 function agoLabel(ms) {
   const m = Math.round(ms / 60000);
@@ -1454,6 +1497,30 @@ async function staffQuotePrice(agent, cmd, env) {
 async function handleStaffRequest(agent, t, env) {
   const kv = env.MEMORY;
 
+  // قواعد دايمة للمساعد ("من هنا ورايح..."، "افتكر إن...") — بتتحفظ ومابتتنسيش بعد 30 دقيقة
+  const r = arKey(t);
+  if (/^(?:القواعد|قواعدي|قواعدك)$/.test(r)) {
+    const rules = (await kv.get(rulesKey(agent), 'json')) || [];
+    await sendText(agent, rules.length ? `📌 القواعد اللي متفقين عليها:\n${rules.map((x, i) => `${i + 1}. ${x}`).join('\n')}\n\nللمسح: "امسح قاعده 2" أو "امسح القواعد"` : 'مفيش قواعد محفوظة لسه.');
+    return true;
+  }
+  const del = toLatinDigits(r).match(/^(?:امسح|الغي|شيل)\s*(?:ال)?قاعده\s*(\d+)$/);
+  if (del || /^(?:امسح|الغي|انسي|انسى)\s*(?:كل\s*)?(?:ال)?قواعد$/.test(r)) {
+    const rules = (await kv.get(rulesKey(agent), 'json')) || [];
+    if (del) rules.splice(Number(del[1]) - 1, 1);
+    await kv.put(rulesKey(agent), JSON.stringify(del ? rules : []));
+    await sendText(agent, del ? `✅ اتمسحت قاعدة ${del[1]}.` : '✅ اتمسحت كل القواعد.');
+    return true;
+  }
+  if (/^(?:من هنا ورايح|من هنا و رايح|من النهارده|من النهاردة|من دلوقتي|بعد كده|افتكر|خليك فاكر|خلي بالك|قاعده|قاعدة)/.test(r) || /^(?:من هنا ورايح|من النهارد|من دلوقتي|افتكر|خليك فاكر)/.test(t)) {
+    const rules = (await kv.get(rulesKey(agent), 'json')) || [];
+    rules.push(t.slice(0, 400));
+    await kv.put(rulesKey(agent), JSON.stringify(rules.slice(-30)));
+    // ونكمّل للمساعد يرد عليها عادي (والقاعدة بقت جزء من تعليماته)
+    await handleAdminQuestion(agent, t, env);
+    return true;
+  }
+
   // أوامر رواتب واضحة → على طول من غير Gemini (أسرع، ومايستهلكش من حد Gemini المجاني)
   const a = arKey(t);
   const payrollShortcut = /(?:^|\s)(?:هن?خرج|نخرج|اخرج|هن?شيل|نشيل|شيل|هن?مشي|نمشي|امشي|امسح|احذف|حذف|طلع)\s*(?:لي\s*)?(?:ال)?موظف/.test(a)
@@ -1498,6 +1565,9 @@ async function handleStaffRequest(agent, t, env) {
   // "رسالة مخصوصة" بتتبعت بس لو الموظف قال صراحة إيه اللي يتقال ("قوله/بلّغه/عرّفه ...").
   // غير كده ("ابعتله رسالة"، "بقاله كتير") = رسالة الودّ الجاهزة — عشان البوت ما يألّفش كلام من عنده
   // (حصل: الفويس اتسمع "بقى دكتور" بدل "بقاله كتير" والبوت بعت تهنئة بالدكتوراة!)
+  // "اكتبلي/ترجملي..." = يكتبهاله هو، مش رسالة لزبون
+  if (['message', 'reengage'].includes(cmd.action) && !cmd.customer && /(اكتبلي|اكتب لي|الفلي|صيغلي|ترجم|بوست|منشور|تهنئه|معايده)/.test(a))
+    cmd = { action: 'chat' };
   if (cmd.action === 'message' && !/قول|قوله|قله|قلو|بلغ|عرف|فهم|رد عليه|ردي عليه|اكتبله|اكتب له/.test(a)) {
     cmd.action = 'reengage';
     delete cmd.message;
@@ -1506,7 +1576,7 @@ async function handleStaffRequest(agent, t, env) {
 
   switch (cmd.action) {
     case 'product_price':
-      if (cmd.product) return lookupProduct(agent, cmd.product, env, { once: true });
+      if (cmd.product && (await lookupProduct(agent, cmd.product, env, { once: true, quiet: true }))) return true;
       break;
     case 'invoice':
       if (cmd.items) return handleStaffCalc(agent, `احسبلي ${cmd.items}`, env);
@@ -1608,7 +1678,8 @@ async function handleAdminQuestion(agent, text, env) {
   const history = await getHistory(agent, env);
   let reply;
   try {
-    const out = await staffChat(text, history);
+    const rules = (await env.MEMORY?.get(rulesKey(agent), 'json')) || [];
+    const out = await staffChat(text, history, { isManager: [config.agent.manager, DEBUG_MANAGER].includes(agent), rules });
     reply = out.reply;
     await saveHistory(agent, out.history, env);
   } catch (err) {
@@ -1728,6 +1799,10 @@ async function handleManagerCommand(agent, customer, num, body, env) {
 const mgrKey = (agent) => `mgrq:${agent}`;
 
 /** لو الرسالة سؤال عن سعر منتج (للمدير) يرجّع اسم المنتج، وإلا null. s = بعد arKey. */
+// أسعار وحاجات بره المحل ("سعر الدولار"، "الدهب بكام") → المساعد الحر مش الكتالوج
+const GENERAL_TOPIC =
+  /(دولار|يورو|ريال|دينار|درهم|استرليني|عمل[هة]|صرف|دهب|ذهب|عيار|فض[هة]|بنزين|سولار|بوتاجاز|كهربا|بيتكوين|كريبتو|سهم|اسهم|بورص[هة]|شق[هة]|عربي[هة]|حديد تسليح|اسمنت|طماطم|لحم|فراخ|تذكر[هة]|طيار[هة]|ايفون|موبايل|لابتوب)/;
+
 function adminProductQuery(s) {
   if (/^(زبون|عرض|طلب|ابعت|تغيير|تغير|غير|عدل|تعديل|وقف|شغل|\/bot)/.test(s)) return null;
   const hasLetters = (x) => /[a-zء-ي]{2,}/i.test(x || '');
@@ -1742,6 +1817,7 @@ function adminProductQuery(s) {
     if (p && !/^(ال)?(بيع|شراء)(\s|$)/.test(p[1]) && !/^(ه|ها|و)(\s|$)/.test(p[1])) m = p;
   }
   const name = m && clean(m[1]);
+  if (name && GENERAL_TOPIC.test(name)) return null;
   return hasLetters(name) ? name : null;
 }
 
@@ -1909,7 +1985,7 @@ async function handleStockQuery(agent, t, env) {
   //   "طرمبة سعره" / "طرمبة سعرها كام" / "طرمبة بكام" / "بكام الطرمبة"
   // ("سعر بيع ... 100" / "سعر شراء ..." تعديل سعر، و"سعر 5 6000" سعر عرض، و"زبون ..." — مش ده)
   const productName = adminProductQuery(s);
-  if (productName) return lookupProduct(agent, productName, env, { once: true });
+  if (productName && (await lookupProduct(agent, productName, env, { once: true, quiet: true }))) return true;
 
   // "المخزون طرمبة" → يدوّر على طول ويطلّع المتشابه
   const stockQ = s.match(/^(?:ال)?(?:مخزون|جرد)\s+(.+)$/);
@@ -2113,12 +2189,14 @@ async function pchgFind(agent, name, env) {
  * يدوّر على منتج ويبعت تفاصيله (بيع/شراء/مخزون). أكتر من منتج شبه الاسم → قايمة بأرقام.
  * once: من اختصار "سعر ..." — بعد الاختيار ما يفضلش في وضع المخزون.
  */
-async function lookupProduct(agent, name, env, { once = false } = {}) {
+async function lookupProduct(agent, name, env, { once = false, quiet = false } = {}) {
   const kv = env.MEMORY;
   const t = name.trim();
   const tail = once ? '' : '\n\n👈 اكتب اسم منتج تاني، أو "خلاص"';
   const found = await searchProducts(t, 10, { raw: true });
   if (!found.length) {
+    // quiet: مش منتج عندنا ("سعر الدولار") → نسيب الكلام يكمّل للمساعد الحر
+    if (quiet) return false;
     await sendText(agent, `مش لاقي منتج اسمه "${t}". جرّب اسم تاني${once ? '' : '، أو "خلاص" للخروج'}.`);
     return true;
   }
