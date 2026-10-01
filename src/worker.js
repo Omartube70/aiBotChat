@@ -446,6 +446,7 @@ export default {
         .catch((err) => console.error('[contacts-sync] خطأ:', err.message)),
     );
     ctx.waitUntil(remindStaffWindow(env).catch((err) => console.error('[remind] خطأ:', err.message)));
+    ctx.waitUntil(remindSalesFile(env).catch((err) => console.error('[sales-remind] خطأ:', err.message)));
     // نسخة الكتالوج المحفوظة بتتحدث هنا — الرسايل مش بتنادي إنياد خالص
     ctx.waitUntil(
       refreshCatalogWithChanges()
@@ -458,6 +459,29 @@ export default {
     );
   },
 };
+
+/**
+ * إنياد مالوش ربط مباشر للمبيعات — فالمدير بيبعت الملف. الساعة 10 بالليل (مرة في اليوم)
+ * لو آخر ملف مبيعات أقدم من امبارح، البوت يفكّره يبعت "تاريخ المبيعات".
+ */
+async function remindSalesFile(env) {
+  const now = new Date(Date.now() + 3 * HOUR); // القاهرة
+  if (now.getUTCHours() !== 22) return;
+  const today = now.toISOString().slice(0, 10);
+  const key = `sales:reminded:${today}`;
+  if (await env.MEMORY.get(key)) return;
+  await env.MEMORY.put(key, '1', { expirationTtl: 2 * 24 * 3600 });
+  const covered = (await env.MEMORY.get('sales:covered', 'json')) || [];
+  const lastTo = covered.map((c) => c[1]).sort().pop();
+  const yesterday = new Date(now.getTime() - 24 * HOUR).toISOString().slice(0, 10);
+  if (lastTo && lastTo >= yesterday) return;
+  await sendText(
+    config.agent.manager,
+    `📊 تذكير: آخر مبيعات عندي لحد ${lastTo || '—'}.\n` +
+      'لو عايز تسألني على مبيعات ومكسب الأيام اللي بعدها، صدّر "تاريخ المبيعات" Excel من إنياد وابعتهولي هنا 🙏\n' +
+      '(والعملاء والموردين لو حابب تحدّث الحسابات)',
+  );
+}
 
 /* ---------- تنبيه المدير باللي اتغيّر في إنياد (كل نص ساعة مع تحديث الكتالوج) ---------- */
 function formatCatalogChanges(c) {
