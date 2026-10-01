@@ -74,6 +74,7 @@ import { normalizeAr } from './catalog.js';
 import { handlePayroll } from './payroll.js';
 import { handleStaffCalc } from './calc.js';
 import { directionsReply } from './directions.js';
+import { readSheet, detectKind, parseSales, parseAccounts, saveSales, saveAccounts, parsePeriod, salesReport, accountLookup, topBalances } from './shopdata.js';
 import {
   OFFER_LABELS,
   mergeOffer,
@@ -185,7 +186,22 @@ export default {
 
     // تجربة رسايل المدير بنفس مسار واتساب بالظبط — الردود بترجع هنا ومش بتتبعت لحد
     //   GET /debug/staff?text=سعر الدولار النهارده
-    if (pathname === '/debug/staff' && env.ENABLE_DEBUG_CHAT === '1') {
+    // فيها بيانات المحل (مبيعات/حسابات) — لازم كلمة السر DEBUG_KEY (secret) في الهيدر x-debug-key
+    const debugAuthed = !!env.DEBUG_KEY && request.headers.get('x-debug-key') === env.DEBUG_KEY;
+    if ((pathname === '/debug/staff' || pathname === '/debug/upload') && !debugAuthed) {
+      return new Response('Not found', { status: 404 });
+    }
+    // رفع ملف إنياد مباشرة (من غير واتساب) — نفس اللي بيحصل لما المدير يبعته
+    if (pathname === '/debug/upload' && method === 'POST') {
+      debugOutbox.length = 0;
+      try {
+        await handleShopFile(DEBUG_MANAGER, new Uint8Array(await request.arrayBuffer()), env);
+      } catch (err) {
+        debugOutbox.push({ error: err.message });
+      }
+      return Response.json({ out: [...debugOutbox] });
+    }
+    if (pathname === '/debug/staff') {
       const text = url.searchParams.get('text') || '';
       if (!text) return Response.json({ error: 'ابعت ?text=رسالتك' }, { status: 400 });
       if (!config.agent.admins.includes(DEBUG_MANAGER)) config.agent.admins.push(DEBUG_MANAGER);
@@ -1193,6 +1209,9 @@ async function handleAgentMessage(agent, text, env, contextId) {
   // تغيير سعر (للمدير بس): "تغيير سعر طرمبة" → يختار المنتج → "بيع 400 شراء 300"
   if (await handlePriceChange(agent, t, env)) return;
 
+  // مبيعات/مكسب/فواتير/حسابات من ملفات إنياد ("مبيعات امبارح"، "فلان عليه كام")
+  if (await handleShopDataQuery(agent, t, env)) return;
+
   // "احسبلي 3 طرمبة IT، 5 قاعدة" → فاتورة (صنف/عدد/سعر/إجمالي + إجمالي الفاتورة) ليك انت بس
   if (await handleStaffCalc(agent, t, env)) return;
 
@@ -1429,6 +1448,7 @@ async function handleFreeMode(agent, t, env, contextId) {
   await kv.put(freeKey(agent), '1', { expirationTtl: FREE_TTL });
   // رقم بعد قايمة منتجات ("لقيت 7 منتجات... اكتب رقم") → يختار من القايمة عادي
   if (/^\d{1,2}$/.test(toLatinDigits(t).trim()) && (await kv.get(mgrKey(agent), 'json'))) return false;
+  if (await handleShopDataQuery(agent, t, env)) return true;
   // سعر صنف من المحل ("سعر طرمبة") → من الكتالوج برضه (بيع وشراء)، مش من المساعد
   const product = config.agent.admins.includes(agent) && adminProductQuery(r);
   if (product && (await lookupProduct(agent, product, env, { once: true, quiet: true }))) return true;
@@ -1733,11 +1753,17 @@ async function handleStaffRequest(agent, t, env) {
       if (await staffQuotePrice(agent, cmd, env)) return true;
       break;
     case 'balance':
+      if (!config.agent.admins.includes(agent)) break;
       await sendText(
         agent,
-        `حسابات ${cmd.kind === 'supplier' ? 'الموردين' : 'العملاء'} (الفلوس اللي لينا وعلينا) لسه مش واصلة للبوت 🙏\n` +
-          'إنياد مش بيدّيها في رابط المحل العام. لو تبعتلي ملف Excel بالحسابات من إنياد، أعلّم البوت يقراه ويرد عليك بيها على طول.',
+        cmd.who
+          ? await accountLookup(env, String(cmd.who), cmd.kind === 'supplier' ? 'supplier' : cmd.kind === 'customer' ? 'customer' : null)
+          : await topBalances(env, cmd.kind === 'supplier' ? 'suppliers' : 'customers'),
       );
+      return true;
+    case 'sales':
+      if (!config.agent.admins.includes(agent)) break;
+      await sendText(agent, await salesReport(env, parsePeriod(String(cmd.period || '')) || parsePeriod('النهارده'), cmd.list ? 'list' : 'summary'));
       return true;
     case 'set_name':
     case 'message':
@@ -2047,13 +2073,49 @@ async function handleGuidedOffer(agent, t, env) {
 async function handleInventoryUpload(agent, doc, env) {
   const isXlsx = /\.xlsx$/i.test(doc.filename) || /spreadsheetml/.test(doc.mimeType);
   if (!isXlsx) {
-    await sendText(agent, 'ابعت ملف الجرد Excel (.xlsx) المتصدّر من إنياد عشان أحدّث الكميات.');
+    await sendText(agent, 'ابعت ملف Excel (.xlsx) من إنياد: المخزون، تاريخ المبيعات، العملاء، أو الموردين.');
     return;
   }
   try {
     const media = await fetchMedia(doc.id);
     if (!media) throw new Error('مقدرتش أنزّل الملف');
-    const inv = parseInventoryXlsx(media.buffer);
+    await handleShopFile(agent, media.buffer, env);
+  } catch (err) {
+    console.error('[shop-file] خطأ:', err.message);
+    await sendText(agent, `❌ مقدرتش أقرا الملف: ${err.message}`);
+  }
+}
+
+/** ملف إنياد (أي نوع من الأربعة) → نتعرّف عليه ونحفظه ونرد بملخص. */
+async function handleShopFile(agent, buffer, env) {
+  const rows = readSheet(buffer);
+  const kind = detectKind(rows);
+  if (kind === 'sales') {
+    const data = parseSales(rows);
+    const { added, total } = await saveSales(env, data);
+    const sum = data.tickets.reduce((s, t) => s + t.total, 0);
+    const margin = data.tickets.reduce((s, t) => s + t.margin, 0);
+    await sendText(
+      agent,
+      `✅ اتحفظ تاريخ المبيعات (${data.from} ← ${data.to}):\n` +
+        `🧾 ${total} فاتورة (${added} جديدة)\n💵 مبيعات ${Math.round(sum).toLocaleString('en-US')} ج.م — مكسب ${Math.round(margin).toLocaleString('en-US')} ج.م\n\n` +
+        'اسألني: "مبيعات امبارح"، "مكسب الأسبوع اللي فات"، "فواتير يوم 20"، "مبيعات الشهر".',
+    );
+    return;
+  }
+  if (kind === 'customers' || kind === 'suppliers') {
+    const data = parseAccounts(rows, kind);
+    await saveAccounts(env, kind, data);
+    await sendText(
+      agent,
+      `✅ اتحفظت حسابات ${kind === 'suppliers' ? 'الموردين' : 'العملاء'} (${data.list.length} اسم).\n\n` +
+        (kind === 'suppliers' ? 'اسألني: "الموردين"، "حساب المورد فلان".' : 'اسألني: "العملاء اللي عليهم فلوس"، "فلان عليه كام".'),
+    );
+    return;
+  }
+  if (kind !== 'inventory') throw new Error('مش عارف نوع الملف ده — ابعت المخزون أو تاريخ المبيعات أو العملاء أو الموردين من إنياد');
+  {
+    const inv = parseInventoryXlsx(buffer);
     await saveInventory(env, inv);
     const tot = inventoryTotals(inv);
     await sendText(
@@ -2065,10 +2127,42 @@ async function handleInventoryUpload(agent, doc, env) {
         'دلوقتي لما تسأل عن منتج هيطلعلك العدد الموجود.',
     );
     console.log(`[inventory] ${agent}: ${tot.count} صنف`);
-  } catch (err) {
-    console.error('[inventory] خطأ:', err.message);
-    await sendText(agent, `❌ مقدرتش أقرا ملف الجرد: ${err.message}`);
   }
+}
+
+/**
+ * أسئلة المبيعات والحسابات من ملفات إنياد (للإدارة بس):
+ * "مبيعات النهارده" / "مكسب امبارح" / "فواتير يوم 20" / "العملاء اللي عليهم فلوس" / "الموردين" / "حساب فلان".
+ */
+async function handleShopDataQuery(agent, t, env) {
+  if (!config.agent.admins.includes(agent)) return false;
+  const s = arKey(t);
+  if (/^(?:احسب|اعمل)/.test(s)) return false; // فاتورة أصناف (احسبلي 3 طرمبة)
+  const salesWord = /(مبيعات|المبيعات|مبيعاتنا|بعنا|بيعنا|ايراد|الايراد|تقفيل|الدرج|فواتير|الفواتير)/.test(s);
+  const profitWord = /(مكسب|المكسب|مكسبنا|ارباح|الارباح|ربح|الربح|كسبنا)/.test(s);
+  const period = parsePeriod(t);
+  if (salesWord || (profitWord && period)) {
+    const p = period || parsePeriod('النهارده');
+    await sendText(agent, await salesReport(env, p, /فواتير|الفواتير/.test(s) ? 'list' : 'summary'));
+    return true;
+  }
+  if (/^(?:ال)?موردين$|حساب(?:ات)? (?:ال)?موردين|(?:ال)?موردين (?:ليهم|لهم|عليهم)|علينا (?:للموردين|كام)/.test(s)) {
+    await sendText(agent, await topBalances(env, 'suppliers'));
+    return true;
+  }
+  if (/(?:العملاء|الزباين|الناس) (?:اللي )?(?:عليهم|عليها)|(?:ال)?مديونيات|(?:ال)?ديون|(?:ال)?اجل|حسابات (?:ال)?عملاء|لينا (?:بره|برا|عند الناس)/.test(s)) {
+    await sendText(agent, await topBalances(env, 'customers'));
+    return true;
+  }
+  const who =
+    (s.match(/^حساب\s+(?:(?:ال)?(?:عميل|زبون|مورد)\s+)?(.{2,40})$/) || [])[1] ||
+    (s.match(/^(.{2,40}?)\s+(?:عليه|عليها|عليهم|ليه|ليها)\s+(?:كام|فلوس|اد ايه|قد ايه)/) || [])[1] ||
+    (s.match(/^(?:لينا|لنا|علينا)\s+(?:عند|ل)\s*(.{2,40}?)\s*(?:كام|اد ايه|قد ايه)?$/) || [])[1];
+  if (who && !/^(?:ال)?(?:موردين|عملاء|زباين)$/.test(who)) {
+    await sendText(agent, await accountLookup(env, who.trim(), /مورد/.test(s) ? 'supplier' : null));
+    return true;
+  }
+  return false;
 }
 
 /** صورة المنتج (لو موجودة) وبعدها تفاصيله. */

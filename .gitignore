@@ -8,3 +8,4 @@ catalog-dump.json
 # Cloudflare Wrangler
 .wrangler/
 .dev.vars
+scripts/tmp/
