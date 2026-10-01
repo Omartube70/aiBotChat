@@ -191,6 +191,10 @@ export default {
       debugOutbox.length = 0;
       if (url.searchParams.get('reset')) await resetHistory(DEBUG_MANAGER, env);
       if (url.searchParams.get('hist')) return Response.json(await getHistory(DEBUG_MANAGER, env));
+      if (url.searchParams.get('rulesOf')) {
+        const who = url.searchParams.get('rulesOf');
+        return Response.json({ rules: await env.MEMORY.get(rulesKey(who), 'json'), history: (await getHistory(who, env)).map((h) => `${h.role}: ${h.parts?.[0]?.text?.slice(0, 150)}`) });
+      }
       if (url.searchParams.get('probe')) {
         const res = [];
         for (const m of url.searchParams.get('probe').split(',')) {
@@ -1100,6 +1104,9 @@ async function handleAgentMessage(agent, text, env, contextId) {
     return;
   }
 
+  // قواعد المساعد ("قاعدة: ..." / "القواعد" / "امسح قاعدة 2") — قبل أي أمر تاني
+  if (await handleRules(agent, t, env)) return;
+
   // رد على "أبعت؟" من أمر بالكلام العادي (قول لعمر ... / حط سعر عرض فلان ...)
   if (await handleStaffPick(agent, t, env)) return;
 
@@ -1494,32 +1501,56 @@ async function staffQuotePrice(agent, cmd, env) {
  * أي رسالة من موظف ما اتفهمتش بالأوامر الثابتة → نفهم هو عايز إيه ونوجّهها:
  * سعر منتج، فاتورة، عرض تركيب، رواتب، رسالة لزبون، رسالة ودّ، تسعير عرض، حسابات، أو كلام عادي.
  */
-async function handleStaffRequest(agent, t, env) {
+/**
+ * قواعد دايمة للمساعد ("قاعدة: ..."، "من هنا ورايح..."، "افتكر إن...") — بتتحفظ ومابتتنسيش.
+ * بتتشيك أول حاجة قبل أي أمر تاني، عشان كلمة في القاعدة ما تتفهمش أمر (سعر/عرض/فاتورة).
+ */
+async function handleRules(agent, t, env) {
   const kv = env.MEMORY;
+  const r = arKey(toLatinDigits(t)).replace(/[.!؟?:،,]+$/, '');
+  const load = async () => (await kv.get(rulesKey(agent), 'json')) || [];
+  const list = (rules) =>
+    rules.length
+      ? `📌 القواعد المحفوظة (${rules.length}):\n${rules.map((x, i) => `${i + 1}. ${x}`).join('\n')}\n\nللمسح: "امسح قاعدة 2" أو "امسح القواعد"`
+      : 'مفيش قواعد محفوظة لسه.\nعشان تحفظ واحدة ابدأ رسالتك بكلمة "قاعدة"، مثال:\nقاعدة: لما أقولك صباحو قولي صباح الفل يا معلم';
 
-  // قواعد دايمة للمساعد ("من هنا ورايح..."، "افتكر إن...") — بتتحفظ ومابتتنسيش بعد 30 دقيقة
-  const r = arKey(t);
-  if (/^(?:القواعد|قواعدي|قواعدك)$/.test(r)) {
-    const rules = (await kv.get(rulesKey(agent), 'json')) || [];
-    await sendText(agent, rules.length ? `📌 القواعد اللي متفقين عليها:\n${rules.map((x, i) => `${i + 1}. ${x}`).join('\n')}\n\nللمسح: "امسح قاعده 2" أو "امسح القواعد"` : 'مفيش قواعد محفوظة لسه.');
+  if (/^(?:(?:اعرض|وريني|ايه|هات|فين)\s*)?(?:ال)?(?:قواعد|قواعدي|قواعدك)(?:\s*(?:ايه|بتاعتي|المحفوظه))?$/.test(r)) {
+    await sendText(agent, list(await load()));
     return true;
   }
-  const del = toLatinDigits(r).match(/^(?:امسح|الغي|شيل)\s*(?:ال)?قاعده\s*(\d+)$/);
-  if (del || /^(?:امسح|الغي|انسي|انسى)\s*(?:كل\s*)?(?:ال)?قواعد$/.test(r)) {
-    const rules = (await kv.get(rulesKey(agent), 'json')) || [];
+  const del = r.match(/^(?:امسح|الغي|شيل|احذف)\s*(?:ال)?قاعده\s*(?:رقم\s*)?(\d+)$/);
+  if (del || /^(?:امسح|الغي|انسي|احذف)\s*(?:كل\s*)?(?:ال)?قواعد$/.test(r)) {
+    const rules = await load();
+    if (del && !rules[Number(del[1]) - 1]) {
+      await sendText(agent, `مفيش قاعدة رقم ${del[1]}.\n\n${list(rules)}`);
+      return true;
+    }
     if (del) rules.splice(Number(del[1]) - 1, 1);
     await kv.put(rulesKey(agent), JSON.stringify(del ? rules : []));
     await sendText(agent, del ? `✅ اتمسحت قاعدة ${del[1]}.` : '✅ اتمسحت كل القواعد.');
     return true;
   }
-  if (/^(?:من هنا ورايح|من هنا و رايح|من النهارده|من النهاردة|من دلوقتي|بعد كده|افتكر|خليك فاكر|خلي بالك|قاعده|قاعدة)/.test(r) || /^(?:من هنا ورايح|من النهارد|من دلوقتي|افتكر|خليك فاكر)/.test(t)) {
-    const rules = (await kv.get(rulesKey(agent), 'json')) || [];
-    rules.push(t.slice(0, 400));
-    await kv.put(rulesKey(agent), JSON.stringify(rules.slice(-30)));
-    // ونكمّل للمساعد يرد عليها عادي (والقاعدة بقت جزء من تعليماته)
-    await handleAdminQuestion(agent, t, env);
+  const m = r.match(
+    /^(?:(?:حط|سجل|ضيف|اكتب|خد|احفظ|عايز\s+(?:احط|اديك|اقولك)|عندي)\s*(?:لي|لك|ليك)?\s*)?(?:قاعده(?:\s*جديده)?|من هنا ?و ?رايح|من النهارده|من دلوقتي|بعد كده|افتكر|خليك فاكر|خلي بالك|خد بالك)(?=\s|:|$)/,
+  );
+  if (!m) return false;
+  // نص القاعدة: من غير كلمة "قاعدة:" اللي في الأول (باقي الكلام زي ما هو)
+  const body = t.replace(/^[^:\n]{0,30}?قاعد[ةه](?:\s*جديد[ةه])?\s*[:،-]?\s*/, '').trim();
+  if (!body || body.length < 4) {
+    await sendText(agent, 'تمام، قولّي القاعدة في نفس الرسالة، مثال:\nقاعدة: لما أقولك صباحو قولي صباح الفل يا معلم');
     return true;
   }
+  const rules = await load();
+  rules.push(body.slice(0, 400));
+  await kv.put(rulesKey(agent), JSON.stringify(rules.slice(-30)));
+  const saved = (await load()).length;
+  console.log(`[rules ${agent}] اتحفظت (${saved}): ${body}`);
+  await sendText(agent, `📌 حفظت القاعدة رقم ${saved}:\n«${body}»\n(اكتب "القواعد" تشوفهم كلهم)`);
+  return true;
+}
+
+async function handleStaffRequest(agent, t, env) {
+  const kv = env.MEMORY;
 
   // أوامر رواتب واضحة → على طول من غير Gemini (أسرع، ومايستهلكش من حد Gemini المجاني)
   const a = arKey(t);
