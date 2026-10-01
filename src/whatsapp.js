@@ -459,6 +459,16 @@ export function parseIncoming(reqBody) {
           };
           text = (msg.image.caption || '').trim(); // لو العميل كتب كلام مع الصورة
         }
+        // لوكيشن (الزبون بعت مكانه) → بنحسبله المسافة والطريق للمحل
+        const location =
+          msg.type === 'location' && Number.isFinite(Number(msg.location?.latitude))
+            ? {
+                lat: Number(msg.location.latitude),
+                lng: Number(msg.location.longitude),
+                name: msg.location.name || '',
+                address: msg.location.address || '',
+              }
+            : null;
 
         out.push({
           from: msg.from,
@@ -469,6 +479,7 @@ export function parseIncoming(reqBody) {
           image,
           flow,
           document,
+          location,
           name: nameByWaId[msg.from],
           // لو الموظف عمل "رد" (quote) على رسالة قديمة، ده الـ wamid بتاعها
           contextId: msg.context?.id || null,

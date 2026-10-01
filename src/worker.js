@@ -73,6 +73,7 @@ import { setEnvRef as setPriceEnvRef, setOverride, clearOverride } from './price
 import { normalizeAr } from './catalog.js';
 import { handlePayroll } from './payroll.js';
 import { handleStaffCalc } from './calc.js';
+import { directionsReply } from './directions.js';
 import {
   OFFER_LABELS,
   mergeOffer,
@@ -191,6 +192,10 @@ export default {
       debugOutbox.length = 0;
       if (url.searchParams.get('reset')) await resetHistory(DEBUG_MANAGER, env);
       if (url.searchParams.get('hist')) return Response.json(await getHistory(DEBUG_MANAGER, env));
+      if (url.searchParams.get('loc')) {
+        const [lat, lng] = url.searchParams.get('loc').split(',').map(Number);
+        return Response.json(await directionsReply({ lat, lng }));
+      }
       if (url.searchParams.get('catalog')) {
         const { count, changes } = await refreshCatalogWithChanges();
         return Response.json({ count, message: formatCatalogChanges(changes), changes });
@@ -591,6 +596,22 @@ function detectReplyModeChange(text) {
   return null;
 }
 
+/** زبون بعت لوكيشن: نرد عليه بالطريق، والموظفين ياخدوا نسخة، والبوت يفتكر إنه بعيد قد إيه. */
+async function handleCustomerLocation(from, msg, env) {
+  const { text, summary } = await directionsReply(msg.location);
+  await sendToUser(from, text, env);
+  const displayName = (await getCustomerDir(env))[from]?.staffName || realName(msg.name) || null;
+  const custNum = await customerNum(from, env);
+  ccStaff(`👤 ${custNum ? `زبون ${custNum} — ` : ''}${displayName ? displayName + ' ' : ''}${from}\n${summary}`, from, env);
+  recordCustomer(from, displayName, summary.split('\n')[0], env).catch(() => {});
+  const history = await getHistory(from, env);
+  await saveHistory(
+    from,
+    [...history, { role: 'user', parts: [{ text: '(بعت اللوكيشن بتاعه)' }] }, { role: 'model', parts: [{ text }] }],
+    env,
+  );
+}
+
 async function handleMessage(msg, env) {
   const { from, id, type } = msg;
   let text = msg.text;
@@ -630,6 +651,12 @@ async function handleMessage(msg, env) {
       }
       await sendText(from, `🎙️ فهمت: «${text}»`);
     }
+    // موظف بعت لوكيشن → المسافة والطريق من عنده لحد المحل
+    if (msg.location) {
+      const { text: reply } = await directionsReply(msg.location);
+      await sendText(from, reply);
+      return;
+    }
     await handleAgentMessage(from, text, env, msg.contextId);
     return;
   }
@@ -638,6 +665,12 @@ async function handleMessage(msg, env) {
   if (!(await isBotEnabled(env))) return;
 
   await markRead(id);
+
+  // لوكيشن → المسافة والوقت والطريق لحد المحل + لينك اتجاهات جوجل، ونسخة للموظفين
+  if (msg.location) {
+    await handleCustomerLocation(from, msg, env);
+    return;
+  }
 
   // رسالة صوتية → ننزّلها ونفرّغها لنص، وبعدها تكمّل عادي
   if (type === 'audio' && msg.audio?.id) {
