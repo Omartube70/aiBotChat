@@ -190,6 +190,50 @@ export async function refreshCatalogSnapshot() {
   return products.length;
 }
 
+// ملخص صغير لكل منتج (بيع/شراء/مستوى المخزون لكل نوع) — بنقارنه كل تحديث عشان نعرف إيه اللي اتغيّر في إنياد
+const COMPACT_KEY = 'catalog:compact';
+const STOCK_AR = { IN_STOCK: 'متاح', LOW_STOCK: 'قليل', OUT_OF_STOCK: 'خلصان' };
+
+function compactOf(products) {
+  const out = {};
+  for (const p of products) {
+    const vs = p.variations?.length ? p.variations : [{ name: '', price: p.price, cost: p.ourCost, stock: p.stock }];
+    for (const v of vs) {
+      const label = v.name && v.name !== p.name ? `${p.name} (${v.name})` : p.name;
+      out[`${p.id}|${v.name || ''}`] = [label, v.price ?? null, Number.isFinite(v.cost) && v.cost > 0 ? v.cost : null, v.stock || ''];
+    }
+  }
+  return out;
+}
+
+/**
+ * بيحدّث الكتالوج ويرجّع اللي اتغيّر في إنياد من آخر مرة (سعر بيع، سعر شراء، مخزون، صنف جديد/اتشال).
+ * أول مرة (مفيش نسخة قديمة) بيرجّع null من غير تنبيهات.
+ */
+export async function refreshCatalogWithChanges() {
+  const products = await fetchAllProducts();
+  await snapKV?.put(SNAP_KEY, JSON.stringify({ at: Date.now(), products }));
+  cache = { products: prepare(products), fetchedAt: Date.now(), loading: null };
+  const now = compactOf(products);
+  const prev = await snapKV?.get(COMPACT_KEY, 'json');
+  await snapKV?.put(COMPACT_KEY, JSON.stringify(now));
+  if (!prev || !products.length) return { count: products.length, changes: null };
+
+  const changes = { price: [], cost: [], stock: [], added: [], removed: [] };
+  for (const [k, [label, price, cost, stock]] of Object.entries(now)) {
+    const o = prev[k];
+    if (!o) {
+      changes.added.push(`${label} — بيع ${price ?? '—'} / شراء ${cost ?? '—'}`);
+      continue;
+    }
+    if (o[1] !== price) changes.price.push(`${label}: ${o[1] ?? '—'} ← ${price ?? '—'}`);
+    if (o[2] !== cost && cost != null) changes.cost.push(`${label}: ${o[2] ?? '—'} ← ${cost}`);
+    if (o[3] !== stock && STOCK_AR[stock] && STOCK_AR[o[3]]) changes.stock.push(`${label}: ${STOCK_AR[o[3]]} ← ${STOCK_AR[stock]}`);
+  }
+  for (const [k, o] of Object.entries(prev)) if (!now[k]) changes.removed.push(o[0]);
+  return { count: products.length, changes };
+}
+
 async function ensureCache() {
   const fresh = Date.now() - cache.fetchedAt < config.catalogTtlMs;
   if (fresh && cache.products.length) return cache.products;

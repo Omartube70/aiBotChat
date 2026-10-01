@@ -63,7 +63,7 @@ import {
   getCustomerDir,
   setCustomerName,
 } from './memory.js';
-import { catalogStats, searchProducts, stockSummary, setCatalogKV, refreshCatalogSnapshot } from './catalog.js';
+import { catalogStats, searchProducts, stockSummary, setCatalogKV, refreshCatalogWithChanges } from './catalog.js';
 import { synthesize } from './tts.js';
 import { computeInvoice, buildInvoiceXlsx } from './invoice.js';
 import { syncGoogleContacts, getContactInfo, startConnect, finishConnect } from './contacts.js';
@@ -191,6 +191,10 @@ export default {
       debugOutbox.length = 0;
       if (url.searchParams.get('reset')) await resetHistory(DEBUG_MANAGER, env);
       if (url.searchParams.get('hist')) return Response.json(await getHistory(DEBUG_MANAGER, env));
+      if (url.searchParams.get('catalog')) {
+        const { count, changes } = await refreshCatalogWithChanges();
+        return Response.json({ count, message: formatCatalogChanges(changes), changes });
+      }
       if (url.searchParams.get('rulesOf')) {
         const who = url.searchParams.get('rulesOf');
         return Response.json({ rules: await env.MEMORY.get(rulesKey(who), 'json'), history: (await getHistory(who, env)).map((h) => `${h.role}: ${h.parts?.[0]?.text?.slice(0, 150)}`) });
@@ -423,12 +427,45 @@ export default {
     ctx.waitUntil(remindStaffWindow(env).catch((err) => console.error('[remind] خطأ:', err.message)));
     // نسخة الكتالوج المحفوظة بتتحدث هنا — الرسايل مش بتنادي إنياد خالص
     ctx.waitUntil(
-      refreshCatalogSnapshot()
-        .then((n) => console.log(`[catalog] اتحدث: ${n} منتج`))
+      refreshCatalogWithChanges()
+        .then(async ({ count, changes }) => {
+          console.log(`[catalog] اتحدث: ${count} منتج`);
+          const msg = formatCatalogChanges(changes);
+          if (msg) await sendText(config.agent.manager, msg);
+        })
         .catch((err) => console.error('[catalog] تحديث خطأ:', err.message)),
     );
   },
 };
+
+/* ---------- تنبيه المدير باللي اتغيّر في إنياد (كل نص ساعة مع تحديث الكتالوج) ---------- */
+function formatCatalogChanges(c) {
+  if (!c) return null;
+  const sec = (title, arr) =>
+    arr.length ? `${title} (${arr.length}):\n${arr.slice(0, 15).map((x) => `• ${x}`).join('\n')}${arr.length > 15 ? `\n… و${arr.length - 15} كمان` : ''}` : null;
+  const parts = [
+    sec('💰 سعر البيع اتغيّر', c.price),
+    sec('🧾 سعر الشراء اتغيّر', c.cost),
+    sec('📦 المخزون اتغيّر', c.stock),
+    sec('🆕 أصناف جديدة', c.added),
+    sec('🗑️ أصناف اتشالت', c.removed),
+  ].filter(Boolean);
+  if (!parts.length) return null;
+  return `🔔 تغييرات في إنياد (آخر نص ساعة):\n\n${parts.join('\n\n')}`.slice(0, 4000);
+}
+
+/** حد من الموظفين غيّر سعر من البوت → المدير يعرف. */
+async function notifyPriceChange(agent, name, patch) {
+  if (agent === config.agent.manager || String(agent).startsWith('dbg')) return;
+  const cur = config.store.currency;
+  await sendText(
+    config.agent.manager,
+    `🔔 الموظف (آخره ${String(agent).slice(-4)}) غيّر سعر "${name}" في البوت:\n` +
+      (patch.sale != null ? `سعر البيع: ${patch.sale} ${cur}\n` : '') +
+      (patch.cost != null ? `سعر الشراء: ${patch.cost} ${cur}\n` : '') +
+      (patch.cleared ? `رجّع سعر ${patch.cleared} لسعر إنياد\n` : ''),
+  );
+}
 
 /* ---------- تذكير أرقام الموظفين قبل ما نافذة الـ 24 ساعة تقفل ---------- */
 // واتساب مش بيسمح للبوت يبعت لرقم ماكلّمهوش آخر 24 ساعة (code 131047) — فنسخ رسايل
@@ -1107,6 +1144,9 @@ async function handleAgentMessage(agent, text, env, contextId) {
   // قواعد المساعد ("قاعدة: ..." / "القواعد" / "امسح قاعدة 2") — قبل أي أمر تاني
   if (await handleRules(agent, t, env)) return;
 
+  // "الحاج معاك" → مساعد حر لأي طلب لحد ما يقول "رجوع للشغل"
+  if (await handleFreeMode(agent, t, env, contextId)) return;
+
   // رد على "أبعت؟" من أمر بالكلام العادي (قول لعمر ... / حط سعر عرض فلان ...)
   if (await handleStaffPick(agent, t, env)) return;
 
@@ -1323,6 +1363,45 @@ async function handleAgentMessage(agent, text, env, contextId) {
 /* ---------- الموظف بيكلّم البوت زي ما بيكلّم موظف (كتابة أو فويس، بـ"يا بوت" أو من غيرها) ---------- */
 const staffPickKey = (a) => `staffpick:${a}`;
 const rulesKey = (a) => `staff:rules:${a}`;
+const MAX_RULES = 200;
+// "الحاج معاك" → وضع المساعد الحر: كل الكلام يروح للمساعد على طول من غير أوامر المحل
+const freeKey = (a) => `staff:free:${a}`;
+const FREE_TTL = 3600; // ساعة سكوت ويرجع لوحده لوضع الشغل
+const FREE_ON_RE = /^(?:يا\s*)?(?:ال)?حاج\s*معاك(?:\s|[.!:،,]|$)/;
+const FREE_OFF_RE = /^(?:رجوع|ارجع|رجعنا|نرجع|يلا)\s*(?:نرجع\s*)?(?:لل|ع\s*ال|علي\s*ال|على\s*ال)?شغل$|^(?:خلصنا|خروج|اخرج)$/;
+
+/** وضع "الحاج معاك": تشغيل/قفل، وأي رسالة وهو شغال تروح للمساعد الحر. @returns اتعامل مع الرسالة ولا لأ. */
+async function handleFreeMode(agent, t, env, contextId) {
+  const kv = env.MEMORY;
+  const r = arKey(t);
+  const on = r.match(FREE_ON_RE);
+  if (on) {
+    await kv.put(freeKey(agent), '1', { expirationTtl: FREE_TTL });
+    const rest = t.replace(/^\s*(?:يا\s*)?(?:ال)?حاج\s*معاك\s*[.!:،,]*\s*/, '').trim();
+    if (!rest) {
+      await sendText(agent, 'أنا معاك يا حاج 🤝 اسأل أو اطلب أي حاجة — شغل أو بره الشغل.\n(لما تخلص قول: *رجوع للشغل*)');
+      return true;
+    }
+    await handleAdminQuestion(agent, rest, env);
+    return true;
+  }
+  if (!(await kv.get(freeKey(agent)))) return false;
+  if (FREE_OFF_RE.test(r)) {
+    await kv.delete(freeKey(agent));
+    await sendText(agent, '✅ رجعنا لوضع الشغل (أسعار، فواتير، عروض، رسايل للزباين).');
+    return true;
+  }
+  // "رد" على رسالة زبون → لسه بتوصله عادي حتى في الوضع الحر
+  if (contextId) return false;
+  await kv.put(freeKey(agent), '1', { expirationTtl: FREE_TTL });
+  // رقم بعد قايمة منتجات ("لقيت 7 منتجات... اكتب رقم") → يختار من القايمة عادي
+  if (/^\d{1,2}$/.test(toLatinDigits(t).trim()) && (await kv.get(mgrKey(agent), 'json'))) return false;
+  // سعر صنف من المحل ("سعر طرمبة") → من الكتالوج برضه (بيع وشراء)، مش من المساعد
+  const product = config.agent.admins.includes(agent) && adminProductQuery(r);
+  if (product && (await lookupProduct(agent, product, env, { once: true, quiet: true }))) return true;
+  await handleAdminQuestion(agent, t, env);
+  return true;
+}
 
 function agoLabel(ms) {
   const m = Math.round(ms / 60000);
@@ -1542,7 +1621,7 @@ async function handleRules(agent, t, env) {
   }
   const rules = await load();
   rules.push(body.slice(0, 400));
-  await kv.put(rulesKey(agent), JSON.stringify(rules.slice(-30)));
+  await kv.put(rulesKey(agent), JSON.stringify(rules.slice(-MAX_RULES)));
   const saved = (await load()).length;
   console.log(`[rules ${agent}] اتحفظت (${saved}): ${body}`);
   await sendText(agent, `📌 حفظت القاعدة رقم ${saved}:\n«${body}»\n(اكتب "القواعد" تشوفهم كلهم)`);
@@ -2185,6 +2264,7 @@ async function handlePriceChange(agent, t, env) {
         '\n(التعديل شغال في ردود البوت على طول — ومش بيغيّر السعر في برنامج إنياد نفسه)',
     );
     console.log(`[price-change] ${agent}: ${st.item.name} ${JSON.stringify(patch)}`);
+    await notifyPriceChange(agent, st.item.name, patch);
     return true;
   }
   return false;
@@ -2254,7 +2334,7 @@ async function lookupProduct(agent, name, env, { once = false, quiet = false } =
   await sendText(
     agent,
     `لقيت ${items.length} منتجات شبه "${t}":\n\n` +
-      items.map((p, i) => `${i + 1}. ${p.name} — ${p.override?.sale ?? p.price ?? '—'} ${config.store.currency}`).join('\n') +
+      items.map((p, i) => `${i + 1}. ${p.name} — بيع ${p.override?.sale ?? p.price ?? '—'} / شراء ${p.override?.cost ?? p.ourCost ?? '—'}`).join('\n') +
       '\n\n👈 اكتب رقم المنتج اللي تقصده',
   );
   return true;
@@ -2441,9 +2521,11 @@ async function handlePriceCommand(agent, t) {
       agent,
       `✅ اتظبط سعر ${fieldLabel} لـ "${product.الاسم}" = ${value} ${config.store.currency}.\n(هيفضل زي ما هو لحد ما تغيّره تاني أو تلغيه)`,
     );
+    await notifyPriceChange(agent, product.الاسم, { [field]: value });
   } else {
     await clearOverride(key, field);
     await sendText(agent, `✅ اتلغى تعديل سعر ${fieldLabel} لـ "${product.الاسم}" — رجع لسعر إنياد الأصلي.`);
+    await notifyPriceChange(agent, product.الاسم, { cleared: fieldLabel });
   }
   return true;
 }
