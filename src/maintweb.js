@@ -70,8 +70,28 @@ async function saveStaff(env, d) {
 }
 function empNet(e) {
   const sal = Number(e.salary) || 0;
-  return Math.round(sal - (Number(e.absDays) || 0) * (sal / 24) - (Number(e.advAmount) || 0));
+  return Math.round(
+    sal - (Number(e.absDays) || 0) * (sal / 24) - (Number(e.advAmount) || 0) - (Number(e.dedAmount) || 0) + (Number(e.bonAmount) || 0),
+  );
 }
+/** تكلفة منتج من كتالوج إنياد بالاسم (أقرب تطابق) — للـ "السعر الأساسي" في قطع الغيار. */
+async function productCost(env, name) {
+  const snap = await env.MEMORY.get('catalog:snapshot', 'json');
+  const prods = (snap && snap.products) || [];
+  const nn = (s) => String(s || '').toLowerCase().replace(/[أإآ]/g, 'ا').replace(/ة/g, 'ه').replace(/[ىي]/g, 'ي').replace(/\s+/g, ' ').trim();
+  const q = nn(name);
+  if (!q) return null;
+  let best = null;
+  for (const p of prods) {
+    const pn = nn(p.name);
+    if (pn === q || pn.includes(q) || q.includes(pn)) {
+      const cost = Number(p.ourCost) || null;
+      if (cost) { best = { name: p.name, cost, price: p.price || null }; if (pn === q) break; }
+    }
+  }
+  return best;
+}
+const EXP_KEY = 'maint:expenses';
 async function hmacHex(secret, msg) {
   const key = await crypto.subtle.importKey('raw', te.encode(secret), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
   const sig = await crypto.subtle.sign('HMAC', key, te.encode(msg));
@@ -141,10 +161,7 @@ export async function handleMaintWeb(request, url, env) {
     const body = await request.json().catch(() => ({}));
     const code = String(body.code || '').trim();
     const cc = await maintCodes(env);
-    let role = null;
-    if (code && code === cc.manager) role = 'manager';
-    else if (code && code === cc.admin) role = 'admin';
-    else if (code && code === cc.view) role = 'view';
+    const role = roleForCode(cc, code);
     if (!role) return json({ ok: false, error: 'الكود غلط' }, 401);
     return json({ ok: true, role, token: await makeToken(role, env) });
   }
@@ -228,7 +245,14 @@ export async function handleMaintWeb(request, url, env) {
     const text = String(body.text || '').trim();
     if (!text && type !== 'maintenance') return json({ ok: false, error: 'اكتب التفاصيل' }, 400);
     b.events = b.events || [];
-    b.events.push({ type, text: text || 'اتعملت صيانة', by: role, at: body.at || now.iso });
+    const ev = { type, text: text || 'اتعملت صيانة', by: role, at: body.at || now.iso };
+    // قطع غيار / مقايسة / شغل خارجي: إيراد + تكلفة → مكسب
+    if (['part', 'measure'].includes(type) && (body.revenue != null || body.cost != null)) {
+      ev.revenue = Number(body.revenue) || 0;
+      ev.cost = Number(body.cost) || 0;
+      ev.profit = ev.revenue - ev.cost;
+    }
+    b.events.push(ev);
     b.updatedAt = now.iso;
     await saveMaint(env, data);
     return json({ ok: true, building: b });
@@ -293,6 +317,100 @@ export async function handleMaintWeb(request, url, env) {
     return json({ ok: true, count: out.length, contacts: out });
   }
 
+  /* ---------- الإعدادات: الأكواد والصلاحيات (المدير بس) ---------- */
+  if (pathname === '/maint/api/settings' && method === 'GET') {
+    if (!isManager) return needMgr();
+    const cc = await maintCodes(env);
+    return json({ ok: true, admin: cc.admin, view: cc.view, manager: cc.manager, extra: cc.extra });
+  }
+  if (pathname === '/maint/api/settings/code' && method === 'POST') {
+    if (!isManager) return needMgr();
+    const b = await request.json().catch(() => ({}));
+    if (!['admin', 'view', 'manager'].includes(b.which)) return json({ ok: false, error: 'نوع غلط' }, 400);
+    const val = String(b.value || '').replace(/\s/g, '');
+    if (!val) return json({ ok: false, error: 'اكتب الكود' }, 400);
+    const c = (await env.MEMORY.get('maint:codes', 'json')) || {};
+    c[b.which] = val;
+    await env.MEMORY.put('maint:codes', JSON.stringify(c));
+    return json({ ok: true });
+  }
+  if (pathname === '/maint/api/settings/extra' && method === 'POST') {
+    if (!isManager) return needMgr();
+    const b = await request.json().catch(() => ({}));
+    const code = String(b.code || '').replace(/\s/g, '');
+    const name = String(b.name || '').trim();
+    const r = ['manager', 'admin', 'view'].includes(b.role) ? b.role : 'view';
+    if (!code || !name) return json({ ok: false, error: 'اكتب الاسم والكود' }, 400);
+    const c = (await env.MEMORY.get('maint:codes', 'json')) || {};
+    c.extra = (Array.isArray(c.extra) ? c.extra : []).filter((e) => String(e.code) !== code);
+    c.extra.push({ name, code, role: r });
+    await env.MEMORY.put('maint:codes', JSON.stringify(c));
+    return json({ ok: true });
+  }
+  if (pathname === '/maint/api/settings/extra-remove' && method === 'POST') {
+    if (!isManager) return needMgr();
+    const b = await request.json().catch(() => ({}));
+    const c = (await env.MEMORY.get('maint:codes', 'json')) || {};
+    c.extra = (Array.isArray(c.extra) ? c.extra : []).filter((e) => String(e.code) !== String(b.code));
+    await env.MEMORY.put('maint:codes', JSON.stringify(c));
+    return json({ ok: true });
+  }
+
+  /* ---------- تكلفة منتج (للسعر الأساسي في قطع الغيار) ---------- */
+  if (pathname === '/maint/api/product-cost' && method === 'GET') {
+    if (!canWrite) return needWrite();
+    const m = await productCost(env, url.searchParams.get('name') || '');
+    return json({ ok: true, match: m });
+  }
+
+  /* ---------- نثريات (مصاريف) ---------- */
+  if (pathname === '/maint/api/expenses' && method === 'GET') {
+    if (!canWrite) return needWrite();
+    const items = (await env.MEMORY.get(EXP_KEY, 'json')) || [];
+    const from = url.searchParams.get('from') || '', to = url.searchParams.get('to') || '';
+    const inR = (at) => (!from || at >= from) && (!to || at <= to + 'T23:59:59');
+    const sel = items.filter((x) => inR(x.at));
+    return json({ ok: true, items: sel.slice(-200).reverse(), total: sel.reduce((s, x) => s + (Number(x.amount) || 0), 0) });
+  }
+  if (pathname === '/maint/api/expenses/add' && method === 'POST') {
+    if (!canWrite) return needWrite();
+    const b = await request.json().catch(() => ({}));
+    const items = (await env.MEMORY.get(EXP_KEY, 'json')) || [];
+    items.push({ id: 'x' + Date.now().toString(36), amount: Number(b.amount) || 0, note: String(b.note || ''), by: role, at: now.iso });
+    await env.MEMORY.put(EXP_KEY, JSON.stringify(items.slice(-2000)));
+    return json({ ok: true });
+  }
+
+  /* ---------- تقرير الأرباح بفترة (المدير بس) ---------- */
+  if (pathname === '/maint/api/profit' && method === 'GET') {
+    if (!isManager) return needMgr();
+    const from = url.searchParams.get('from') || '', to = url.searchParams.get('to') || '';
+    const inR = (at) => at && (!from || at >= from) && (!to || at <= to + 'T23:59:59');
+    let maintCollected = 0, partsRev = 0, partsCost = 0;
+    for (const bld of data.buildings) {
+      for (const e of bld.events || []) {
+        if (!inR(e.at)) continue;
+        if (e.type === 'payment') maintCollected += Number(e.amount) || 0;
+        else if ((e.type === 'part' || e.type === 'measure') && (e.revenue != null || e.cost != null)) {
+          partsRev += Number(e.revenue) || 0; partsCost += Number(e.cost) || 0;
+        }
+      }
+    }
+    const partsNet = partsRev - partsCost;
+    const workersShare = Math.round(partsNet / 3);
+    const shopPartsShare = partsNet - workersShare;
+    const expItems = (await env.MEMORY.get(EXP_KEY, 'json')) || [];
+    const petty = expItems.filter((x) => inR(x.at)).reduce((s, x) => s + (Number(x.amount) || 0), 0);
+    const sd = await loadStaff(env);
+    let payouts = 0;
+    for (const e of sd.emps) for (const h of e.history || []) if (inR(h.paidAt)) payouts += Number(h.net) || 0;
+    const shopNet = maintCollected + shopPartsShare - petty - payouts;
+    return json({
+      ok: true, from, to,
+      maintCollected, partsRev, partsCost, partsNet, workersShare, shopPartsShare, petty, payouts, shopNet,
+    });
+  }
+
   /* ---------- الموظفين والرواتب ---------- */
   if (pathname === '/maint/api/staff' && method === 'GET') {
     const sd = await loadStaff(env);
@@ -307,7 +425,7 @@ export async function handleMaintWeb(request, url, env) {
     const sd = await loadStaff(env);
     const e = sd.emps.find((x) => x.id === url.searchParams.get('id'));
     if (!e) return json({ ok: false, error: 'مش موجود' }, 404);
-    const out = { id: e.id, name: e.name, advAmount: Number(e.advAmount) || 0, absDays: Number(e.absDays) || 0, events: e.events || [], history: e.history || [], lastPaidAt: e.lastPaidAt || null };
+    const out = { id: e.id, name: e.name, advAmount: Number(e.advAmount) || 0, absDays: Number(e.absDays) || 0, dedAmount: Number(e.dedAmount) || 0, bonAmount: Number(e.bonAmount) || 0, events: e.events || [], history: e.history || [], lastPaidAt: e.lastPaidAt || null };
     if (isManager) { out.salary = Number(e.salary) || 0; out.net = empNet(e); out.dayVal = Math.round((Number(e.salary) || 0) / 24); }
     return json({ ok: true, isManager, canWrite, emp: out });
   }
@@ -331,22 +449,19 @@ export async function handleMaintWeb(request, url, env) {
     await saveStaff(env, sd);
     return json({ ok: true });
   }
-  if ((pathname === '/maint/api/staff/advance' || pathname === '/maint/api/staff/absence') && method === 'POST') {
+  if (pathname.match(/^\/maint\/api\/staff\/(advance|absence|deduction|bonus)$/) && method === 'POST') {
     if (!canWrite) return needWrite();
+    const kind = pathname.split('/').pop();
     const b = await request.json().catch(() => ({}));
     const sd = await loadStaff(env);
     const e = sd.emps.find((x) => x.id === b.id);
     if (!e) return json({ ok: false, error: 'مش موجود' }, 404);
     e.events = e.events || [];
-    if (pathname.endsWith('advance')) {
-      const amt = Number(b.amount) || 0;
-      e.advAmount = (Number(e.advAmount) || 0) + amt;
-      e.events.push({ type: 'advance', amount: amt, text: String(b.note || ''), by: role, at: now.iso });
-    } else {
-      const d = Number(b.days) || 0;
-      e.absDays = (Number(e.absDays) || 0) + d;
-      e.events.push({ type: 'absence', days: d, text: String(b.note || ''), by: role, at: now.iso });
-    }
+    const note = String(b.note || '');
+    if (kind === 'advance') { const a = Number(b.amount) || 0; e.advAmount = (Number(e.advAmount) || 0) + a; e.events.push({ type: 'advance', amount: a, text: note, by: role, at: now.iso }); }
+    else if (kind === 'deduction') { const a = Number(b.amount) || 0; e.dedAmount = (Number(e.dedAmount) || 0) + a; e.events.push({ type: 'deduction', amount: a, text: note, by: role, at: now.iso }); }
+    else if (kind === 'bonus') { const a = Number(b.amount) || 0; e.bonAmount = (Number(e.bonAmount) || 0) + a; e.events.push({ type: 'bonus', amount: a, text: note, by: role, at: now.iso }); }
+    else { const d = Number(b.days) || 0; e.absDays = (Number(e.absDays) || 0) + d; e.events.push({ type: 'absence', days: d, text: note, by: role, at: now.iso }); }
     e.updatedAt = now.iso;
     await saveStaff(env, sd);
     return json({ ok: true });
@@ -358,10 +473,10 @@ export async function handleMaintWeb(request, url, env) {
     const e = sd.emps.find((x) => x.id === b.id);
     if (!e) return json({ ok: false, error: 'مش موجود' }, 404);
     e.history = e.history || [];
-    e.history.push({ paidAt: now.iso, salary: Number(e.salary) || 0, advAmount: Number(e.advAmount) || 0, absDays: Number(e.absDays) || 0, net: empNet(e) });
+    e.history.push({ paidAt: now.iso, salary: Number(e.salary) || 0, advAmount: Number(e.advAmount) || 0, absDays: Number(e.absDays) || 0, dedAmount: Number(e.dedAmount) || 0, bonAmount: Number(e.bonAmount) || 0, net: empNet(e) });
     e.events = e.events || [];
     e.events.push({ type: 'paid', amount: empNet(e), text: 'تم القبض', by: role, at: now.iso });
-    e.advAmount = 0; e.absDays = 0; e.lastPaidAt = now.iso; e.updatedAt = now.iso;
+    e.advAmount = 0; e.absDays = 0; e.dedAmount = 0; e.bonAmount = 0; e.lastPaidAt = now.iso; e.updatedAt = now.iso;
     await saveStaff(env, sd);
     return json({ ok: true });
   }
@@ -615,14 +730,15 @@ function paintHome(){
   recompute();
   el('mlabel').textContent=(SUM.monthName||'')+' '+(SELYEAR||'')+' ▾';el('mlabel').style.cursor='pointer';el('mlabel').onclick=changeMonth;updateNet();
   var h='<div class="cards">'+card('المطلوب',money(SUM.expected),'')+card('المتحصّل',money(SUM.collected),'green')+card('المتبقّي',money((SUM.expected||0)-(SUM.collected||0)),'redc')+card('ما دفعوش',SUM.unpaidCount,'redc')+'</div>';
-  h+='<div class="actions"><button class="btn sm" id="faultsBtn">🔴 أعطال ('+SUM.faults+')</button><button class="btn sm o" id="staffBtn">👷 الموظفين</button>'+(cw()?'<button class="btn sm o" id="bcBtn">📢 تحذير جماعي</button><button class="btn sm o" id="addBtn">+ عملية</button>':'')+'<button class="btn sm o" id="logoutBtn">خروج</button></div>';
+  h+='<div class="actions"><button class="btn sm" id="faultsBtn">🔴 أعطال ('+SUM.faults+')</button><button class="btn sm o" id="staffBtn">👷 الموظفين</button>'+(cw()?'<button class="btn sm o" id="pettyBtn">🧾 نثريات</button>':'')+(mgr()?'<button class="btn sm o" id="profitBtn">💰 الأرباح</button><button class="btn sm o" id="setBtn">⚙️ إعدادات</button>':'')+(cw()?'<button class="btn sm o" id="bcBtn">📢 تحذير جماعي</button><button class="btn sm o" id="addBtn">+ عملية</button>':'')+'<button class="btn sm o" id="logoutBtn">خروج</button></div>';
   h+='<div class="search">🔎<input id="q" placeholder="دوّر على عمارة (زي 90ج)"></div>';
   h+='<div class="chips" id="chips"></div><div id="list"></div>';
   el('body').innerHTML=h;el('q').value=Q;
   el('logoutBtn').addEventListener('click',logout);
   el('faultsBtn').addEventListener('click',function(){FAULTSONLY=!FAULTSONLY;loadList();});
   el('staffBtn').addEventListener('click',openStaff);
-  if(cw()){el('addBtn').addEventListener('click',addBuilding);el('bcBtn').addEventListener('click',broadcast);}
+  if(cw()){el('addBtn').addEventListener('click',addBuilding);el('bcBtn').addEventListener('click',broadcast);el('pettyBtn').addEventListener('click',openPetty);}
+  if(mgr()){el('profitBtn').addEventListener('click',openProfit);el('setBtn').addEventListener('click',openSettings);}
   var zc={};LIST.forEach(function(b){zc[b.zone||'—']=(zc[b.zone||'—']||0)+1;});
   var zs=Object.keys(zc).sort();
   var chips='<span class="chip '+(ZONE===''?'on':'')+'" data-z="">الكل</span>';
@@ -720,12 +836,66 @@ function payMonth(m){
   saveCur();enqueue('pay',{id:CUR.id,month:m,year:SELYEAR,amount:amount,at:new Date().toISOString()});renderB(CUR);
 }
 function addEv(type){
+  if(type==='part'||type==='measure'){return addPart(type);}
   var label=EVT[type]||'';
   var text=type==='maintenance'?(prompt('تفاصيل الصيانة (أو سيبها فاضية):','')||''):prompt(label+' — اكتب التفاصيل:','');
   if(text==null&&type!=='maintenance')return;
   (CUR.events=CUR.events||[]).push({type:type,text:text||'اتعملت صيانة',by:ROLE,at:new Date().toISOString()});
   var li=listItem(CUR.id);if(li){if(type==='fault')li.fault=true;if(type==='maintenance')li.fault=false;}
   saveCur();enqueue('event',{id:CUR.id,type:type,text:text,at:new Date().toISOString()});renderB(CUR);
+}
+function addPart(type){
+  var what=type==='measure'?'مقايسة':'قطعة غيار / شغل';
+  var name=prompt(what+' — الاسم (لو منتج عندنا هجيب تكلفته):','');if(name==null)return;
+  function cont(cost){
+    var rev=prompt('اخدنا كام؟ (الإيراد/سعر البيع):','');if(rev==null)return;
+    var c=prompt('صرفنا عليها كام؟ (التكلفة — لو منتج عندنا لقيت '+(cost!=null?cost:'0')+'):',cost!=null?String(cost):'');if(c==null)return;
+    var revenue=Number(String(rev).replace(/[^0-9.]/g,''))||0, costv=Number(String(c).replace(/[^0-9.]/g,''))||0;
+    var ev={type:type,text:name,revenue:revenue,cost:costv,profit:revenue-costv,by:ROLE,at:new Date().toISOString()};
+    (CUR.events=CUR.events||[]).push(ev);saveCur();
+    enqueue('event',{id:CUR.id,type:type,text:name,revenue:revenue,cost:costv,at:ev.at});renderB(CUR);
+  }
+  if(navigator.onLine){
+    fetch('/maint/api/product-cost?name='+encodeURIComponent(name),{headers:{Authorization:'Bearer '+T}}).then(function(r){return r.json();}).then(function(d){cont(d.match?d.match.cost:null);}).catch(function(){cont(null);});
+  }else cont(null);
+}
+function openPetty(){
+  fetch('/maint/api/expenses',{headers:{Authorization:'Bearer '+T}}).then(function(r){return r.json();}).then(function(d){
+    var h='<header><div class="t">🧾 نثريات</div><span class="badge" id="closeB" style="cursor:pointer">✕</span></header><div class="pad">';
+    h+='<div class="c" style="background:var(--gl);margin-bottom:10px"><div class="l">إجمالي النثريات المعروضة</div><div class="v redc">'+money(d.total)+' ج</div></div>';
+    h+='<div class="actions"><button class="btn sm" id="addExp">+ نثرية</button></div>';
+    var evs=d.items||[];
+    h+=evs.length?evs.map(function(x){return '<div class="ev">💸 '+money(x.amount)+' ج · '+dlabel(x.at)+(x.note?' — '+esc(x.note):'')+'</div>';}).join(''):'<div class="muted">لسه مفيش</div>';
+    h+='</div>';el('sheet').innerHTML=h;el('ov').style.display='flex';
+    el('closeB').addEventListener('click',closeB);
+    el('addExp').addEventListener('click',function(){var a=prompt('قيمة النثرية (جنيه):','');if(a==null)return;var n=prompt('على إيه؟','')||'';fetch('/maint/api/expenses/add',{method:'POST',headers:{'Content-Type':'application/json',Authorization:'Bearer '+T},body:JSON.stringify({amount:Number(a)||0,note:n})}).then(function(r){return r.json();}).then(function(d){if(d.ok)openPetty();});});
+  }).catch(function(){alert('النثريات محتاجة نت.');});
+}
+function openProfit(){
+  var d2=new Date(),d1=new Date(Date.now()-14*864e5);
+  var def1=d1.toISOString().slice(0,10),def2=d2.toISOString().slice(0,10);
+  var h='<header><div class="t">💰 الأرباح</div><span class="badge" id="closeB" style="cursor:pointer">✕</span></header><div class="pad">';
+  h+='<div class="sec">الفترة</div><div style="display:flex;gap:8px;margin-bottom:10px"><input id="pf" type="date" value="'+def1+'" style="flex:1;padding:10px;border:1px solid var(--line);border-radius:10px;font-family:inherit"><input id="pt" type="date" value="'+def2+'" style="flex:1;padding:10px;border:1px solid var(--line);border-radius:10px;font-family:inherit"></div>';
+  h+='<button class="btn" id="calcP" style="width:100%">احسب</button><div id="pres" style="margin-top:12px"></div></div>';
+  el('sheet').innerHTML=h;el('ov').style.display='flex';
+  el('closeB').addEventListener('click',closeB);
+  el('calcP').addEventListener('click',function(){
+    var from=el('pf').value,to=el('pt').value;
+    fetch('/maint/api/profit?from='+from+'&to='+to,{headers:{Authorization:'Bearer '+T}}).then(function(r){return r.json();}).then(function(d){
+      if(!d.ok){el('pres').innerHTML='<div class="muted">'+(d.error||'مشكلة')+'</div>';return;}
+      function row(l,v,cls){return '<div style="display:flex;justify-content:space-between;padding:7px 0;border-bottom:1px solid var(--line)"><span>'+l+'</span><span class="'+(cls||'')+'" style="font-weight:600">'+money(v)+' ج</span></div>';}
+      el('pres').innerHTML=
+        row('دخل الصيانة (محصّل)',d.maintCollected,'green')+
+        row('إيراد قطع الغيار/المقايسات',d.partsRev)+
+        row('تكلفة قطع الغيار',d.partsCost,'redc')+
+        row('صافي قطع الغيار',d.partsNet)+
+        row('↳ نصيب العمّال (⅓)',d.workersShare,'redc')+
+        row('↳ نصيب المحل (⅔)',d.shopPartsShare,'green')+
+        row('النثريات',d.petty,'redc')+
+        row('مسحوبات الرواتب',d.payouts,'redc')+
+        '<div style="display:flex;justify-content:space-between;padding:11px 0;margin-top:4px"><span style="font-weight:700">صافي ربح المحل</span><span class="green" style="font-weight:700;font-size:18px">'+money(d.shopNet)+' ج</span></div>';
+    }).catch(function(){el('pres').innerHTML='<div class="muted">محتاج نت.</div>';});
+  });
 }
 function editUnion(){
   var cts=(CUR.contacts&&CUR.contacts.length)?CUR.contacts:[];
@@ -803,11 +973,12 @@ function openEmp(id){
       h+='<div class="cards"><div class="c"><div class="l">الراتب</div><div class="v">'+money(e.salary)+'</div></div><div class="c"><div class="l">اليوم (÷24)</div><div class="v">'+money(e.dayVal)+'</div></div></div>';
       h+='<div class="c" style="background:var(--gl);margin-bottom:12px"><div class="l">صافي القبض لحد دلوقتي</div><div class="v green">'+money(e.net)+' ج</div></div>';
     }
-    h+='<div class="cards"><div class="c"><div class="l">سلف الفترة</div><div class="v redc">'+money(e.advAmount)+'</div></div><div class="c"><div class="l">غياب الفترة</div><div class="v redc">'+(e.absDays||0)+' يوم</div></div></div>';
-    if(d.canWrite)h+='<div class="actions"><button class="btn sm" data-a="adv">+ سلفة</button><button class="btn sm o" data-a="abs">+ غياب</button>'+(d.isManager?'<button class="btn sm o" data-a="sal">تعديل الراتب</button><button class="btn sm" data-a="paid" style="background:var(--g)">✅ تم القبض</button><button class="btn sm o" data-a="del">حذف</button>':'')+'</div>';
+    h+='<div class="cards"><div class="c"><div class="l">سلف الفترة</div><div class="v redc">'+money(e.advAmount)+'</div></div><div class="c"><div class="l">غياب الفترة</div><div class="v redc">'+(e.absDays||0)+' يوم</div></div>';
+    h+='<div class="c"><div class="l">خصومات</div><div class="v redc">'+money(e.dedAmount)+'</div></div><div class="c"><div class="l">إضافي</div><div class="v green">'+money(e.bonAmount)+'</div></div></div>';
+    if(d.canWrite)h+='<div class="actions"><button class="btn sm" data-a="adv">+ سلفة</button><button class="btn sm o" data-a="abs">+ غياب</button><button class="btn sm o" data-a="ded">+ خصم</button><button class="btn sm o" data-a="bon">+ إضافي</button>'+(d.isManager?'<button class="btn sm o" data-a="sal">تعديل الراتب</button><button class="btn sm" data-a="paid" style="background:var(--g)">✅ تم القبض</button><button class="btn sm o" data-a="del">حذف</button>':'')+'</div>';
     h+='<div class="sec">الحركة (الأحدث أولاً)</div>';
     var evs=(e.events||[]).slice().reverse();
-    h+=evs.length?evs.map(function(x){var lbl=x.type==="advance"?("💵 سلفة "+money(x.amount)+" ج"):x.type==="absence"?("🚫 غياب "+(x.days||0)+" يوم"):x.type==="paid"?("✅ تم القبض"+(d.isManager?(" ("+money(x.amount)+" ج)"):"")):"📝";return '<div class="ev">'+lbl+' · '+dlabel(x.at)+(x.text?' — '+esc(x.text):'')+'</div>';}).join(''):'<div class="muted">لسه مفيش</div>';
+    h+=evs.length?evs.map(function(x){var lbl=x.type==="advance"?("💵 سلفة "+money(x.amount)+" ج"):x.type==="absence"?("🚫 غياب "+(x.days||0)+" يوم"):x.type==="deduction"?("➖ خصم "+money(x.amount)+" ج"):x.type==="bonus"?("➕ إضافي "+money(x.amount)+" ج"):x.type==="paid"?("✅ تم القبض"+(d.isManager?(" ("+money(x.amount)+" ج)"):"")):"📝";return '<div class="ev">'+lbl+' · '+dlabel(x.at)+(x.text?' — '+esc(x.text):'')+'</div>';}).join(''):'<div class="muted">لسه مفيش</div>';
     h+='</div>';
     el('sheet').innerHTML=h;
     el('backStaff').addEventListener('click',openStaff);
@@ -818,12 +989,44 @@ function openEmp(id){
 function empAction(a,e){
   if(a==='adv'){var amt=prompt('قيمة السلفة:','');if(amt==null)return;var n=prompt('ملاحظة (اختياري):','')||'';staffPost('advance',{id:e.id,amount:Number(amt)||0,note:n},e.id);}
   else if(a==='abs'){var d=prompt('غاب كام يوم؟','1');if(d==null)return;var n2=prompt('ملاحظة (اختياري):','')||'';staffPost('absence',{id:e.id,days:Number(d)||0,note:n2},e.id);}
+  else if(a==='ded'){var dd=prompt('قيمة الخصم (جنيه):','');if(dd==null)return;var n3=prompt('سبب الخصم (اختياري):','')||'';staffPost('deduction',{id:e.id,amount:Number(dd)||0,note:n3},e.id);}
+  else if(a==='bon'){var bb=prompt('قيمة الإضافي (جنيه):','');if(bb==null)return;var n4=prompt('سبب الإضافي (اختياري):','')||'';staffPost('bonus',{id:e.id,amount:Number(bb)||0,note:n4},e.id);}
   else if(a==='sal'){var s=prompt('الراتب الجديد:',e.salary||'');if(s==null)return;staffPost('salary',{id:e.id,salary:Number(s)||0},e.id);}
   else if(a==='paid'){if(!confirm('تأكيد: تم قبض '+e.name+'؟ هنبدأ فترة جديدة (السلف والغياب يتصفّروا).'))return;staffPost('paid',{id:e.id},e.id);}
   else if(a==='del'){if(!confirm('حذف '+e.name+' نهائيًا؟'))return;staffPost('remove',{id:e.id},null);}
 }
 function staffPost(path,body,reopenId){
   fetch('/maint/api/staff/'+path,{method:'POST',headers:{'Content-Type':'application/json',Authorization:'Bearer '+T},body:JSON.stringify(body)}).then(function(r){return r.json();}).then(function(d){if(d.ok){if(reopenId)openEmp(reopenId);else openStaff();}else alert(d.error||'مشكلة');}).catch(function(){alert('محتاج نت.');});
+}
+
+function roleLbl(r){return r==='manager'?'كامل (مدير)':r==='admin'?'تعديل':'مشاهدة';}
+function openSettings(){
+  fetch('/maint/api/settings',{headers:{Authorization:'Bearer '+T}}).then(function(r){return r.json();}).then(function(d){
+    if(!d.ok){alert(d.error||'للمدير بس');return;}
+    var h='<header><div class="t">⚙️ الإعدادات</div><span class="badge" id="closeB" style="cursor:pointer">✕</span></header><div class="pad">';
+    h+='<div class="sec">الأكواد الأساسية</div>';
+    h+='<div class="ev">👑 كود المدير (ليك إنت — بيشوف الرواتب والأرباح): <b>'+esc(d.manager)+'</b> <a data-ec="manager" style="cursor:pointer">تغيير</a></div>';
+    h+='<div class="ev">✏️ كود التعديل (الإدارة): <b>'+esc(d.admin)+'</b> <a data-ec="admin" style="cursor:pointer">تغيير</a></div>';
+    h+='<div class="ev">👁️ كود المشاهدة: <b>'+esc(d.view)+'</b> <a data-ec="view" style="cursor:pointer">تغيير</a></div>';
+    h+='<div class="sec">أكواد الموظفين (صلاحية لكل كود)</div><div class="actions"><button class="btn sm" id="addExtra">+ كود موظف</button></div><div id="exList" style="margin-top:6px">';
+    (d.extra||[]).forEach(function(x){h+='<div class="ev">'+esc(x.name)+' — كود <b>'+esc(x.code)+'</b> — '+roleLbl(x.role)+' <a data-rm="'+esc(x.code)+'" style="cursor:pointer;color:#A32D2D">حذف</a></div>';});
+    if(!(d.extra||[]).length)h+='<div class="muted">مفيش أكواد موظفين إضافية</div>';
+    h+='</div></div>';
+    el('sheet').innerHTML=h;el('ov').style.display='flex';
+    el('closeB').addEventListener('click',closeB);
+    el('addExtra').addEventListener('click',function(){
+      var name=prompt('اسم الموظف:','');if(!name)return;
+      var code=prompt('الكود اللي هيدخل بيه:','');if(!code)return;
+      var r=prompt('الصلاحية؟ اكتب: مشاهدة / تعديل / كامل','تعديل');if(r==null)return;
+      r=(r.indexOf('كامل')>=0||r.indexOf('مدير')>=0)?'manager':(r.indexOf('مشاهد')>=0?'view':'admin');
+      fetch('/maint/api/settings/extra',{method:'POST',headers:{'Content-Type':'application/json',Authorization:'Bearer '+T},body:JSON.stringify({name:name,code:code,role:r})}).then(function(x){return x.json();}).then(function(x){if(x.ok)openSettings();else alert(x.error||'مشكلة');});
+    });
+    el('sheet').addEventListener('click',function(ev){
+      var ec=ev.target.closest('[data-ec]'),rm=ev.target.closest('[data-rm]');
+      if(ec){var w=ec.getAttribute('data-ec');var v=prompt('الكود الجديد:','');if(!v)return;fetch('/maint/api/settings/code',{method:'POST',headers:{'Content-Type':'application/json',Authorization:'Bearer '+T},body:JSON.stringify({which:w,value:v})}).then(function(x){return x.json();}).then(function(x){if(x.ok)openSettings();else alert(x.error||'مشكلة');});}
+      else if(rm){if(!confirm('حذف الكود؟'))return;fetch('/maint/api/settings/extra-remove',{method:'POST',headers:{'Content-Type':'application/json',Authorization:'Bearer '+T},body:JSON.stringify({code:rm.getAttribute('data-rm')})}).then(function(x){return x.json();}).then(function(x){if(x.ok)openSettings();});}
+    });
+  }).catch(function(){alert('الإعدادات محتاجة نت.');});
 }
 
 window.addEventListener('online',function(){OFF=false;flush(function(){if(el('mlabel'))renderHome();});});
