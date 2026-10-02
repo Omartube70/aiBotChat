@@ -190,6 +190,13 @@ export async function handleQodsPos(request, url, env) {
     await env.MEMORY.put(CODES_KEY, JSON.stringify(c)); return json({ ok: true });
   }
 
+  if (pathname === '/pos/api/accounts' && method === 'GET') {
+    const kind = url.searchParams.get('kind') === 'suppliers' ? 'suppliers' : 'customers';
+    const d = (await env.MEMORY.get('acct:' + kind, 'json')) || { list: [] };
+    const list = (d.list || []).map((a) => ({ name: a.name, phone: a.phone || '', net: (Number(a.gave) || 0) - (Number(a.took) || 0) }));
+    return json({ ok: true, kind, at: d.at || null, count: list.length, list });
+  }
+
   if (pathname === '/pos/api/report' && method === 'GET') {
     if (!isMgr) return json({ ok: false, error: 'للمدير بس' }, 403);
     const date = url.searchParams.get('date') || now.date;
@@ -255,7 +262,7 @@ const POS_HTML = `<!doctype html>
 <body><div class="wrap" id="app"><div class="empty">...</div></div>
 <div class="overlay" id="ov"><div class="sheet" id="sheet"></div></div>
 <script>
-var T=localStorage.getItem('pos_token')||'',ROLE=localStorage.getItem('pos_role')||'',PROD=[],CART=[],TAB='sell';
+var T=localStorage.getItem('pos_token')||'',ROLE=localStorage.getItem('pos_role')||'',PROD=[],CART=[],TAB='sell',ACCKIND='customers';
 function el(i){return document.getElementById(i);}
 function money(n){return (Math.round(Number(n)||0)).toLocaleString('en-US');}
 function esc(s){return String(s==null?'':s).replace(/[<>&"]/g,function(c){return{'<':'&lt;','>':'&gt;','&':'&amp;','"':'&quot;'}[c];});}
@@ -280,10 +287,10 @@ function doLogin(){var code=el('code').value.trim();fetch('/pos/api/login',{meth
 function home(){
   el('app').innerHTML='<header><div class="t">🛗 القدس — المحل</div><button class="btn sm o" style="color:#fff;border-color:#fff" id="out">خروج</button></header><div class="tabs" id="tabs"></div><div id="body" class="pad"><div class="empty">بحمّل...</div></div>';
   el('out').onclick=logout;
-  var tabs=[['sell','🛒 بيع'],['drawer','💵 الخزنة'],['staff','👷 موظفين']];if(mgr()){tabs.push(['report','📊 اليومية']);tabs.push(['settings','⚙️ إعدادات']);}
+  var tabs=[['sell','🛒 بيع'],['drawer','💵 الخزنة'],['accounts','👥 حسابات'],['staff','👷 موظفين']];if(mgr()){tabs.push(['report','📊 اليومية']);tabs.push(['settings','⚙️ إعدادات']);}
   el('tabs').innerHTML=tabs.map(function(t){return '<button data-t="'+t[0]+'" class="'+(TAB===t[0]?'on':'')+'">'+t[1]+'</button>';}).join('');
   el('tabs').onclick=function(e){var b=e.target.closest('button');if(!b)return;TAB=b.getAttribute('data-t');home();};
-  if(TAB==='sell')sell();else if(TAB==='drawer')drawer();else if(TAB==='staff')staff();else if(TAB==='report')report();else settings();
+  if(TAB==='sell')sell();else if(TAB==='drawer')drawer();else if(TAB==='accounts')accounts();else if(TAB==='staff')staff();else if(TAB==='report')report();else settings();
 }
 /* ---- بيع ---- */
 function sell(){
@@ -424,6 +431,24 @@ function drawer(){
     el('find').onclick=function(){dlg('بحث عن فاتورة',[{k:'no',label:'رقم الفاتورة (زي 261002-WV1)'}],function(v){if(!v.no){return;}api('invoice?no='+encodeURIComponent(v.no.trim())).then(function(r){if(r.ok&&r.sale)showInvoice(r.sale);else toast('مفيش فاتورة بالرقم ده');});});};
     el('body').onclick=function(e){var r=e.target.closest('[data-no]');if(!r)return;var no=r.getAttribute('data-no');var s=(window._today||[]).find(function(x){return x.no===no;});if(s)showInvoice(s);};
   });
+}
+/* ---- حسابات العملاء والموردين (عليه/ليه) ---- */
+function accounts(){
+  fetch('/pos/api/accounts?kind='+ACCKIND,{headers:{Authorization:'Bearer '+T}}).then(function(r){return r.json();}).then(function(d){
+    var list=d.list||[];
+    var owe=list.filter(function(a){return a.net>0;}),owed=list.filter(function(a){return a.net<0;});
+    var sumOwe=owe.reduce(function(s,a){return s+a.net;},0),sumOwed=owed.reduce(function(s,a){return s-a.net;},0);
+    var h='<div class="actions" style="margin-bottom:8px"><button class="btn sm '+(ACCKIND==='customers'?'':'o')+'" id="acC">👥 العملاء</button><button class="btn sm '+(ACCKIND==='suppliers'?'':'o')+'" id="acS">🏭 الموردين</button></div>';
+    h+='<div class="cards"><div class="c"><div class="l">'+(ACCKIND==='customers'?'عليهم لينا':'احنا علينا لهم')+'</div><div class="v redc">'+money(ACCKIND==='customers'?sumOwe:sumOwed)+'</div></div><div class="c"><div class="l">العدد</div><div class="v">'+list.length+'</div></div></div>';
+    h+='<div class="search">🔎<input id="acq" placeholder="دوّر بالاسم..."></div><div id="aclist"></div>';
+    el('body').innerHTML=h;
+    el('acC').onclick=function(){ACCKIND='customers';accounts();};
+    el('acS').onclick=function(){ACCKIND='suppliers';accounts();};
+    function paint(q){q=(q||'').toLowerCase();var L=q?list.filter(function(a){return (a.name||'').toLowerCase().indexOf(q)>=0;}):list;
+      L=L.slice().sort(function(a,b){return b.net-a.net;});
+      el('aclist').innerHTML=L.slice(0,500).map(function(a){var bal=a.net>0?('<b style="color:var(--red)">عليه '+money(a.net)+'</b>'):a.net<0?('<b style="color:var(--g)">ليه '+money(-a.net)+'</b>'):'<span class="muted">—</span>';return '<div class="row"><span>'+esc(a.name)+(a.phone?'<div class="muted" style="font-size:11px">'+esc(a.phone)+'</div>':'')+'</span>'+bal+'</div>';}).join('')||'<div class="empty">مفيش</div>';}
+    paint('');var t;el('acq').addEventListener('input',function(){clearTimeout(t);var v=el('acq').value;t=setTimeout(function(){paint(v);},180);});
+  }).catch(function(){el('body').innerHTML='<div class="empty">محتاج نت.</div>';});
 }
 /* ---- موظفين ---- */
 function staff(){
