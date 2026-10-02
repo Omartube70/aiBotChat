@@ -80,6 +80,26 @@ function workDays(startIso, endIso) {
   for (const d = new Date(s); d <= e && i < 800; d.setUTCDate(d.getUTCDate() + 1), i++) if (d.getUTCDay() !== 5) n++;
   return n;
 }
+function nnm(s) { return String(s || '').toLowerCase().replace(/[أإآ]/g, 'ا').replace(/ة/g, 'ه').replace(/[ىي]/g, 'ي').replace(/\s+/g, ' ').trim(); }
+/** مخزن منتجات القدس (قابل للتعديل): يتعمل أول مرة من كتالوج إنياد + ملف الجرد. */
+async function loadQodsProducts(env) {
+  let p = await env.MEMORY.get('qods:products', 'json');
+  if (p && Array.isArray(p.items) && p.items.length) return p;
+  const snap = await env.MEMORY.get('catalog:snapshot', 'json');
+  const prods = (snap && snap.products) || [];
+  const inv = await env.MEMORY.get('inv:data', 'json');
+  const invMap = {};
+  for (const it of (inv && inv.items) || []) invMap[nnm(it.name)] = it;
+  let seq = 0;
+  const items = prods.filter((x) => x && x.name && x.price != null).map((x) => {
+    const iv = invMap[nnm(x.name)];
+    return { id: 'p' + (++seq), name: x.name, sell: Number(x.price) || 0, cost: Number(x.ourCost) || (iv ? Number(iv.cost) || 0 : 0), img: x.imageUrl || null, qty: iv ? Number(iv.qty) || 0 : 0, active: true };
+  });
+  p = { seq, items };
+  await env.MEMORY.put('qods:products', JSON.stringify(p));
+  return p;
+}
+async function saveQodsProducts(env, p) { await env.MEMORY.put('qods:products', JSON.stringify(p)); }
 function empPeriodStart(e) { return e.periodStart || e.lastPaidAt || e.createdAt || null; }
 function empNet(e) {
   const sal = Number(e.salary) || 0, daily = sal / 24;
@@ -116,12 +136,64 @@ export async function handleQodsPos(request, url, env) {
   const canWrite = role === 'manager' || role === 'admin';
   const now = cairoNow();
 
-  if (pathname === '/pos/api/products' && method === 'GET') return json({ ok: true, products: await products(env) });
+  if (pathname === '/pos/api/products' && method === 'GET') {
+    const p = await loadQodsProducts(env);
+    return json({ ok: true, products: p.items.filter((x) => x.active !== false).map((x) => ({ id: x.id, name: x.name, price: x.sell, img: x.img, qty: x.qty, cost: isMgr ? x.cost : undefined })) });
+  }
+  if (pathname === '/pos/api/inventory' && method === 'GET') {
+    if (!canWrite) return json({ ok: false, error: 'مشاهدة بس' }, 403);
+    const p = await loadQodsProducts(env);
+    const items = p.items.filter((x) => x.active !== false).map((x) => ({ id: x.id, name: x.name, qty: Number(x.qty) || 0, cost: isMgr ? (Number(x.cost) || 0) : undefined, value: isMgr ? Math.round((Number(x.qty) || 0) * (Number(x.cost) || 0)) : undefined }));
+    const totalQty = items.reduce((s, x) => s + x.qty, 0);
+    const totalValue = isMgr ? p.items.reduce((s, x) => s + (Number(x.qty) || 0) * (Number(x.cost) || 0), 0) : undefined;
+    return json({ ok: true, isManager: isMgr, count: items.length, totalQty, totalValue: isMgr ? Math.round(totalValue) : undefined, items });
+  }
+  if (pathname === '/pos/api/product/edit' && method === 'POST') {
+    if (!canWrite) return json({ ok: false, error: 'مشاهدة بس' }, 403);
+    const b = await request.json().catch(() => ({}));
+    const p = await loadQodsProducts(env);
+    const it = p.items.find((x) => x.id === b.id);
+    if (!it) return json({ ok: false, error: 'مش موجود' }, 404);
+    if (b.name != null && String(b.name).trim()) it.name = String(b.name).trim();
+    if (b.sell != null && b.sell !== '') it.sell = Number(b.sell) || 0;
+    if (b.cost != null && b.cost !== '') { if (!isMgr) return json({ ok: false, error: 'سعر الشراء للمدير بس' }, 403); it.cost = Number(b.cost) || 0; }
+    if (b.img != null) it.img = String(b.img) || null;
+    await saveQodsProducts(env, p);
+    return json({ ok: true });
+  }
+  if (pathname === '/pos/api/product/qty' && method === 'POST') {
+    if (!canWrite) return json({ ok: false, error: 'مشاهدة بس' }, 403);
+    const b = await request.json().catch(() => ({}));
+    const p = await loadQodsProducts(env);
+    const it = p.items.find((x) => x.id === b.id);
+    if (!it) return json({ ok: false, error: 'مش موجود' }, 404);
+    if (b.set != null) it.qty = Number(b.set) || 0;
+    else it.qty = (Number(it.qty) || 0) + (Number(b.delta) || 0);
+    await saveQodsProducts(env, p);
+    return json({ ok: true, qty: it.qty });
+  }
+  if (pathname === '/pos/api/inventory/clear' && method === 'POST') {
+    if (!isMgr) return json({ ok: false, error: 'مسح المخزون للمدير بس' }, 403);
+    const p = await loadQodsProducts(env);
+    for (const it of p.items) it.qty = 0;
+    await saveQodsProducts(env, p);
+    return json({ ok: true });
+  }
+  if (pathname === '/pos/api/product/add' && method === 'POST') {
+    if (!canWrite) return json({ ok: false, error: 'مشاهدة بس' }, 403);
+    const b = await request.json().catch(() => ({}));
+    const name = String(b.name || '').trim();
+    if (!name) return json({ ok: false, error: 'اكتب اسم المنتج' }, 400);
+    const p = await loadQodsProducts(env);
+    p.items.push({ id: 'p' + (++p.seq), name, sell: Number(b.sell) || 0, cost: Number(b.cost) || 0, img: String(b.img || '') || null, qty: Number(b.qty) || 0, active: true });
+    await saveQodsProducts(env, p);
+    return json({ ok: true });
+  }
 
   if (pathname === '/pos/api/sale' && method === 'POST') {
     if (!canWrite) return json({ ok: false, error: 'مشاهدة بس' }, 403);
     const b = await request.json().catch(() => ({}));
-    const items = Array.isArray(b.items) ? b.items.map((x) => ({ name: String(x.name || ''), price: Number(x.price) || 0, qty: Number(x.qty) || 1 })) : [];
+    const items = Array.isArray(b.items) ? b.items.map((x) => ({ id: x.id || null, name: String(x.name || ''), price: Number(x.price) || 0, qty: Number(x.qty) || 1 })) : [];
     if (!items.length) return json({ ok: false, error: 'مفيش أصناف' }, 400);
     const subtotal = items.reduce((s, x) => s + x.price * x.qty, 0);
     const discount = Number(b.discount) || 0;
@@ -131,6 +203,16 @@ export async function handleQodsPos(request, url, env) {
     const sale = { no, items, subtotal, discount, total, customer: String(b.customer || ''), seller, by: role, at: now.iso, date: now.date };
     all.push(sale);
     await env.MEMORY.put(SALES_KEY, JSON.stringify(all.slice(-5000)));
+    // ينقص من المخزون
+    try {
+      const p = await loadQodsProducts(env);
+      let changed = false;
+      for (const it of items) {
+        const prod = (it.id && p.items.find((x) => x.id === it.id)) || p.items.find((x) => nnm(x.name) === nnm(it.name));
+        if (prod) { prod.qty = (Number(prod.qty) || 0) - it.qty; changed = true; }
+      }
+      if (changed) await saveQodsProducts(env, p);
+    } catch { /* المخزون مش مهم يوقف البيع */ }
     return json({ ok: true, sale });
   }
 
@@ -214,6 +296,21 @@ export async function handleQodsPos(request, url, env) {
     if (!isMgr) return json({ ok: false, error: 'للمدير بس' }, 403);
     const b = await request.json().catch(() => ({})); const sd = await loadStaff(env);
     sd.emps = sd.emps.filter((x) => x.id !== b.id); await env.MEMORY.put(STAFF_KEY, JSON.stringify(sd)); return json({ ok: true });
+  }
+  if (pathname === '/pos/api/staff/event-delete' && method === 'POST') {
+    if (!canWrite) return json({ ok: false, error: 'مشاهدة بس' }, 403);
+    const b = await request.json().catch(() => ({})); const sd = await loadStaff(env);
+    const e = sd.emps.find((x) => x.id === b.id); if (!e) return json({ ok: false, error: 'مش موجود' }, 404);
+    const idx = (e.events || []).findIndex((x) => x.at === b.at && x.type === b.type);
+    if (idx < 0) return json({ ok: false, error: 'مش موجود' }, 404);
+    const ev = e.events[idx];
+    if (ev.type === 'advance') e.advAmount = Math.max(0, (Number(e.advAmount) || 0) - (Number(ev.amount) || 0));
+    else if (ev.type === 'deduction') e.dedAmount = Math.max(0, (Number(e.dedAmount) || 0) - (Number(ev.amount) || 0));
+    else if (ev.type === 'bonus') e.bonAmount = Math.max(0, (Number(e.bonAmount) || 0) - (Number(ev.amount) || 0));
+    else if (ev.type === 'absence') e.absDays = Math.max(0, (Number(e.absDays) || 0) - (Number(ev.days) || 0));
+    else return json({ ok: false, error: 'البند ده مش بيتشال' }, 400);
+    e.events.splice(idx, 1);
+    await env.MEMORY.put(STAFF_KEY, JSON.stringify(sd)); return json({ ok: true });
   }
 
   if (pathname === '/pos/api/settings' && method === 'GET') {
@@ -338,6 +435,7 @@ function dlg(title,fields,onok){
 }
 function confirmBox(msg,onok){el('sheet').innerHTML='<div style="font-size:15px;margin:6px 0 16px">'+esc(msg)+'</div><button class="btn" style="width:100%" id="cf_ok">تمام</button><button class="btn o" style="width:100%;margin-top:8px" id="cf_cx">إلغاء</button>';el('ov').style.display='flex';el('cf_cx').onclick=function(){el('ov').style.display='none';};el('cf_ok').onclick=function(){el('ov').style.display='none';onok();};}
 function toast(m){var t=document.createElement('div');t.textContent=m;t.style.cssText='position:fixed;bottom:24px;left:50%;transform:translateX(-50%);background:#2c2c2a;color:#fff;padding:11px 20px;border-radius:22px;z-index:200;font-size:14px;max-width:90%;text-align:center';document.body.appendChild(t);setTimeout(function(){t.remove();},2600);}
+function confirmType(word,msg,onok){el('sheet').innerHTML='<div style="font-size:15px;margin:6px 0 12px">'+esc(msg)+'</div><div class="muted" style="margin-bottom:6px">اكتب «'+esc(word)+'» للتأكيد:</div><input class="f" id="ct_in" placeholder="'+esc(word)+'"><div id="ct_e" style="color:var(--red);font-size:13px;min-height:16px"></div><button class="btn" style="width:100%;margin-top:6px" id="ct_ok">تأكيد</button><button class="btn o" style="width:100%;margin-top:8px" id="ct_cx">إلغاء</button>';el('ov').style.display='flex';el('ct_cx').onclick=function(){el('ov').style.display='none';};el('ct_ok').onclick=function(){if((el('ct_in').value||'').trim()===word){el('ov').style.display='none';onok();}else el('ct_e').textContent='اكتب الكلمة صح';};}
 function api(p,o){o=o||{};o.headers=o.headers||{};if(T)o.headers.Authorization='Bearer '+T;if(o.body){o.headers['Content-Type']='application/json';o.body=JSON.stringify(o.body);}return fetch('/pos/api/'+p,o).then(function(r){if(r.status===401){logout();throw new Error('x');}return r.json();});}
 function logout(){localStorage.removeItem('pos_token');localStorage.removeItem('pos_role');T='';ROLE='';renderLogin();}
 function renderLogin(){el('app').innerHTML='<div class="center"><div class="login"><div style="font-size:20px;font-weight:700;color:var(--g)">🛗 القدس — المحل</div><div class="muted" style="margin-top:6px">اكتب كود الدخول</div><input id="code" type="tel" inputmode="numeric" placeholder="كود"><div class="err" id="e"></div><button class="btn" style="width:100%" id="lb">دخول</button></div></div>';el('code').focus();el('lb').onclick=doLogin;el('code').addEventListener('keydown',function(e){if(e.key==='Enter')doLogin();});}
@@ -345,10 +443,10 @@ function doLogin(){var code=el('code').value.trim();fetch('/pos/api/login',{meth
 function home(){
   el('app').innerHTML='<header><div class="t">🛗 القدس — المحل</div><button class="btn sm o" style="color:#fff;border-color:#fff" id="out">خروج</button></header><div class="tabs" id="tabs"></div><div id="body" class="pad"><div class="empty">بحمّل...</div></div>';
   el('out').onclick=logout;
-  var tabs=[['sell','🛒 بيع'],['drawer','💵 الخزنة'],['accounts','👥 حسابات'],['staff','👷 موظفين']];if(mgr()){tabs.push(['report','📊 اليومية']);tabs.push(['settings','⚙️ إعدادات']);}
+  var tabs=[['sell','🛒 بيع'],['products','📦 منتجات'],['inv','🗄️ مخزون'],['drawer','💵 الخزنة'],['accounts','👥 حسابات'],['staff','👷 موظفين']];if(mgr()){tabs.push(['report','📊 اليومية']);tabs.push(['settings','⚙️ إعدادات']);}
   el('tabs').innerHTML=tabs.map(function(t){return '<button data-t="'+t[0]+'" class="'+(TAB===t[0]?'on':'')+'">'+t[1]+'</button>';}).join('');
   el('tabs').onclick=function(e){var b=e.target.closest('button');if(!b)return;TAB=b.getAttribute('data-t');home();};
-  if(TAB==='sell')sell();else if(TAB==='drawer')drawer();else if(TAB==='accounts')accounts();else if(TAB==='staff')staff();else if(TAB==='report')report();else settings();
+  if(TAB==='sell')sell();else if(TAB==='products')products();else if(TAB==='inv')inventory();else if(TAB==='drawer')drawer();else if(TAB==='accounts')accounts();else if(TAB==='staff')staff();else if(TAB==='report')report();else settings();
 }
 /* ---- بيع ---- */
 function sell(){
@@ -357,7 +455,46 @@ function sell(){
   function go(){var P=PROD.map(function(p,i){p._i=i;return p;});paint(P);el('q').addEventListener('input',function(){var q=norm(el('q').value);paint(q?P.filter(function(p){return norm(p.name).indexOf(q)>=0;}):P);});el('g').onclick=function(e){var c=e.target.closest('.p');if(c)addCart(PROD[Number(c.getAttribute('data-i'))]);};renderCartBar();}
   if(PROD.length)go();else api('products').then(function(d){PROD=d.products||[];go();});
 }
-function addCart(p){var f=CART.find(function(x){return x.name===p.name&&x.price===p.price;});if(f)f.qty++;else CART.push({name:p.name,price:p.price,qty:1});renderCartBar();}
+function addCart(p){var f=CART.find(function(x){return x.name===p.name&&x.price===p.price;});if(f)f.qty++;else CART.push({id:p.id,name:p.name,price:p.price,qty:1});renderCartBar();}
+/* ---- منتجات (تعديل الأسعار والاسم) ---- */
+function products(){
+  el('body').innerHTML='<div class="search">🔎<input id="pq" placeholder="دوّر على منتج..."></div>'+(cw()?'<div class="actions" style="margin-bottom:8px"><button class="btn sm" id="pAdd">+ منتج جديد</button></div>':'')+'<div id="plist"><div class="empty">بحمّل...</div></div>';
+  fetch('/pos/api/products',{headers:{Authorization:'Bearer '+T}}).then(function(r){return r.json();}).then(function(d){
+    var L=d.products||[];window._prods=L;
+    function paint(q){q=nnp(q);var F=q?L.filter(function(p){return nnp(p.name).indexOf(q)>=0;}):L;
+      el('plist').innerHTML=F.slice(0,400).map(function(p){var img=p.img?'<img src="'+esc(p.img)+'" style="width:44px;height:44px;object-fit:cover;border-radius:8px;margin-left:8px">':'';return '<div class="row" data-id="'+esc(p.id)+'" style="cursor:pointer"><div style="display:flex;align-items:center">'+img+'<div><div style="font-weight:600">'+esc(p.name)+'</div><div class="muted">بيع '+money(p.price)+(p.cost!=null?(' · شراء '+money(p.cost)):'')+' · مخزون '+(p.qty||0)+'</div></div></div><div style="color:var(--mut)">✎</div></div>';}).join('')||'<div class="empty">مفيش</div>';}
+    paint('');var t;el('pq').addEventListener('input',function(){clearTimeout(t);var v=el('pq').value;t=setTimeout(function(){paint(v);},180);});
+    el('plist').onclick=function(e){var r=e.target.closest('[data-id]');if(!r)return;var p=L.find(function(x){return x.id===r.getAttribute('data-id');});if(p)editProduct(p);};
+    if(el('pAdd'))el('pAdd').onclick=function(){dlg('منتج جديد',[{k:'name',label:'الاسم'},{k:'sell',label:'سعر البيع',type:'number'},{k:'cost',label:'سعر الشراء',type:'number'},{k:'qty',label:'الكمية',type:'number'}],function(v){if(!v.name){toast('اكتب الاسم');return;}api('product/add',{method:'POST',body:{name:v.name,sell:Number(v.sell)||0,cost:Number(v.cost)||0,qty:Number(v.qty)||0}}).then(function(x){if(x.ok)products();else toast(x.error||'مشكلة');});});};
+  });
+}
+function nnp(s){return String(s||'').toLowerCase().replace(/[أإآ]/g,'ا').replace(/ة/g,'ه').replace(/[ىي]/g,'ي').replace(/\\s+/g,' ').trim();}
+function editProduct(p){
+  var f=[{k:'name',label:'اسم المنتج',value:p.name},{k:'sell',label:'سعر البيع',type:'number',value:p.sell}];
+  if(p.cost!=null)f.push({k:'cost',label:'سعر الشراء',type:'number',value:p.cost});
+  f.push({k:'img',label:'لينك الصورة (اختياري)',value:p.img||''});
+  dlg('تعديل المنتج',f,function(v){api('product/edit',{method:'POST',body:{id:p.id,name:v.name,sell:v.sell,cost:v.cost,img:v.img}}).then(function(x){if(x.ok){toast('اتعدّل ✅');products();}else toast(x.error||'مشكلة');});});
+}
+/* ---- المخزون ---- */
+function inventory(){
+  fetch('/pos/api/inventory',{headers:{Authorization:'Bearer '+T}}).then(function(r){return r.json();}).then(function(d){
+    if(!d.ok){el('body').innerHTML='<div class="empty">'+(d.error||'')+'</div>';return;}
+    var L=d.items||[];window._inv=L;
+    var h='<div class="cards"><div class="c"><div class="l">عدد الأصناف</div><div class="v">'+d.count+'</div></div>'+(d.isManager?('<div class="c"><div class="l">إجمالي قيمة المخزون (شراء)</div><div class="v">'+money(d.totalValue)+' ج</div></div>'):('<div class="c"><div class="l">إجمالي القطع</div><div class="v">'+d.totalQty+'</div></div>'))+'</div>';
+    h+='<div class="search">🔎<input id="iq" placeholder="دوّر على صنف..."></div>';
+    if(mgr())h+='<div class="actions" style="margin-bottom:8px"><button class="btn sm o" id="iclr" style="color:#A32D2D;border-color:#A32D2D">🗑️ مسح كميات المخزون</button></div>';
+    h+='<div id="ilist"></div>';el('body').innerHTML=h;
+    function paint(q){q=nnp(q);var F=q?L.filter(function(x){return nnp(x.name).indexOf(q)>=0;}):L;
+      el('ilist').innerHTML=F.slice(0,500).map(function(x){return '<div class="row" data-id="'+esc(x.id)+'"><div><div style="font-weight:600">'+esc(x.name)+'</div>'+(x.value!=null?('<div class="muted">قيمة: '+money(x.value)+' ج</div>'):'')+'</div><div style="display:flex;align-items:center;gap:6px">'+(cw()?'<button class="btn sm o iq-" data-m="'+esc(x.id)+'">−</button>':'')+'<b style="min-width:34px;text-align:center">'+x.qty+'</b>'+(cw()?'<button class="btn sm o iq+" data-p="'+esc(x.id)+'">+</button>':'')+'</div></div>';}).join('')||'<div class="empty">مفيش</div>';}
+    paint('');var t;el('iq').addEventListener('input',function(){clearTimeout(t);var v=el('iq').value;t=setTimeout(function(){paint(v);},180);});
+    el('ilist').onclick=function(e){var pl=e.target.closest('[data-p]'),mi=e.target.closest('[data-m]');if(pl)qtyAdj(pl.getAttribute('data-p'),1);else if(mi)qtyAdj(mi.getAttribute('data-m'),-1);};
+    if(el('iclr'))el('iclr').onclick=function(){confirmType('مسح','هتمسح كل كميات المخزون (الأسماء والأسعار والصور تفضل زي ما هي). متأكد؟',function(){api('inventory/clear',{method:'POST'}).then(function(x){if(x.ok){toast('اتمسحت الكميات');inventory();}else toast(x.error||'مشكلة');});});};
+  });
+}
+function qtyAdj(id,delta){
+  if(delta>0){dlg('إضافة للمخزون',[{k:'n',label:'تضيف كام قطعة؟',type:'number',value:'1'}],function(v){api('product/qty',{method:'POST',body:{id:id,delta:Number(v.n)||0}}).then(function(){inventory();});});}
+  else{dlg('خصم من المخزون',[{k:'n',label:'تخصم كام قطعة؟',type:'number',value:'1'}],function(v){api('product/qty',{method:'POST',body:{id:id,delta:-(Number(v.n)||0)}}).then(function(){inventory();});});}
+}
 function cartTotal(){return CART.reduce(function(s,x){return s+x.price*x.qty;},0);}
 function renderCartBar(){var old=document.getElementById('cb');if(old)old.remove();if(!cw())return;var n=CART.reduce(function(s,x){return s+x.qty;},0);var bar=document.createElement('div');bar.id='cb';bar.className='cartbar';bar.innerHTML='<div style="flex:1"><b>'+n+'</b> صنف · <b>'+money(cartTotal())+'</b> ج</div><button class="btn o sm" id="clr">تفريغ</button><button class="btn" id="chk">الدفع ('+money(cartTotal())+')</button>';el('app').appendChild(bar);el('clr').onclick=function(){CART=[];sell();};el('chk').onclick=checkout;}
 function checkout(){
@@ -535,10 +672,13 @@ function openEmp(id){
     if(d.canWrite)h+='<div class="actions"><button class="btn sm" data-a="adv">+ سلفة</button><button class="btn sm o" data-a="abs">+ غياب</button><button class="btn sm o" data-a="ded">+ خصم</button><button class="btn sm o" data-a="bon">+ إضافي</button>'+(d.isManager?'<button class="btn sm o" data-a="start">🟢 بداية عمل</button><button class="btn sm o" data-a="sal">تعديل الراتب</button><button class="btn sm" data-a="paid" style="background:var(--g)">✅ تم القبض</button><button class="btn sm o" data-a="del">حذف</button>':'')+'</div>';
     h+='<div style="font-size:13px;color:var(--mut);font-weight:600;margin:12px 0 6px">الحركة</div>';
     var evs=(e.events||[]).slice().reverse();
-    h+=evs.length?evs.map(function(x){var lbl=x.type==='absence'?(SEVT.absence+' '+(x.days||0)+' يوم'):((SEVT[x.type]||'•')+(x.amount!=null?(' '+money(x.amount)+' ج'):''));return '<div class="row">'+lbl+' · '+dlabel(x.at)+(x.text?' — '+esc(x.text):'')+'</div>';}).join(''):'<div class="muted">لسه مفيش</div>';
+    h+=evs.length?evs.map(function(x){var lbl=x.type==='absence'?(SEVT.absence+' '+(x.days||0)+' يوم'):((SEVT[x.type]||'•')+(x.amount!=null?(' '+money(x.amount)+' ج'):''));var del=(d.canWrite&&['advance','deduction','bonus','absence'].indexOf(x.type)>=0)?('<a data-dat="'+esc(x.at)+'" data-dty="'+x.type+'" style="color:#A32D2D;cursor:pointer;font-weight:700">✕</a>'):'';return '<div class="row"><span>'+lbl+' · '+dlabel(x.at)+(x.text?' — '+esc(x.text):'')+'</span>'+del+'</div>';}).join(''):'<div class="muted">لسه مفيش</div>';
     el('body').innerHTML=h;
     el('bk').onclick=staff;
-    el('body').addEventListener('click',function(ev){var btn=ev.target.closest('button[data-a]');if(btn)empAction(btn.getAttribute('data-a'),e);});
+    el('body').addEventListener('click',function(ev){
+      var btn=ev.target.closest('button[data-a]');if(btn){empAction(btn.getAttribute('data-a'),e);return;}
+      var dl=ev.target.closest('[data-dat]');if(dl){var at=dl.getAttribute('data-dat'),ty=dl.getAttribute('data-dty');confirmBox('تشيل البند ده؟',function(){api('staff/event-delete',{method:'POST',body:{id:e.id,at:at,type:ty}}).then(function(x){if(x.ok)openEmp(e.id);else toast(x.error||'مشكلة');});});}
+    });
   });
 }
 function empAction(a,e){
