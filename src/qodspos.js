@@ -15,6 +15,8 @@
  *   POST /pos/api/staff/absence   { id, days } [إدارة]
  *   GET  /pos/api/report?date=    تقرير اليوم (دخل/نثريات/يوميات/صافي) [مدير]
  */
+import { QODS_ICON_B64 } from './qodsicon.js';
+function b64ToBytes(b64) { return Uint8Array.from(atob(b64), (c) => c.charCodeAt(0)); }
 const SNAP_KEY = 'catalog:snapshot';
 const SALES_KEY = 'qods:sales';
 const EXP_KEY = 'qods:expenses';
@@ -80,6 +82,7 @@ export async function handleQodsPos(request, url, env) {
   if (pathname === '/pos' || pathname === '/pos/') return new Response(POS_HTML, { headers: { 'Content-Type': 'text/html; charset=utf-8' } });
   if (pathname === '/pos/sw.js') return new Response(SW, { headers: { 'Content-Type': 'text/javascript; charset=utf-8', 'Service-Worker-Allowed': '/pos', 'Cache-Control': 'no-cache' } });
   if (pathname === '/pos/manifest.webmanifest') return new Response(MANIFEST, { headers: { 'Content-Type': 'application/manifest+json; charset=utf-8' } });
+  if (pathname === '/pos/icon-512.png') return new Response(b64ToBytes(QODS_ICON_B64), { headers: { 'Content-Type': 'image/png', 'Cache-Control': 'public, max-age=86400' } });
   if (!pathname.startsWith('/pos/api/')) return null;
 
   if (pathname === '/pos/api/login' && method === 'POST') {
@@ -214,15 +217,15 @@ export async function handleQodsPos(request, url, env) {
   return json({ ok: false, error: 'مسار غير معروف' }, 404);
 }
 
-const SW = `const C='pos-v1';self.addEventListener('install',function(e){self.skipWaiting();e.waitUntil(caches.open(C).then(function(c){return c.add('/pos');}));});self.addEventListener('activate',function(e){e.waitUntil(self.clients.claim());});self.addEventListener('fetch',function(e){var u=new URL(e.request.url);if(e.request.method!=='GET')return;if(u.pathname==='/pos'||u.pathname==='/pos/'){e.respondWith((async function(){try{var r=await fetch(e.request);var c=await caches.open(C);c.put('/pos',r.clone());return r;}catch(err){return (await caches.match('/pos'))||new Response('offline',{status:503});}})());}});`;
-const MANIFEST = JSON.stringify({ name: 'القدس — المحل', short_name: 'القدس محل', start_url: '/pos', scope: '/pos', display: 'standalone', background_color: '#0F6E56', theme_color: '#0F6E56', lang: 'ar', dir: 'rtl', icons: [{ src: '/qods/icon-512.png', sizes: '512x512', type: 'image/png', purpose: 'any maskable' }] });
+const SW = `const C='pos-v2';self.addEventListener('install',function(e){self.skipWaiting();e.waitUntil(caches.open(C).then(function(c){return c.add('/pos');}));});self.addEventListener('activate',function(e){e.waitUntil(self.clients.claim());});self.addEventListener('fetch',function(e){var u=new URL(e.request.url);if(e.request.method!=='GET')return;if(u.pathname==='/pos'||u.pathname==='/pos/'){e.respondWith((async function(){try{var r=await fetch(e.request);var c=await caches.open(C);c.put('/pos',r.clone());return r;}catch(err){return (await caches.match('/pos'))||new Response('offline',{status:503});}})());}});`;
+const MANIFEST = JSON.stringify({ name: 'القدس — المحل', short_name: 'القدس', id: '/pos', start_url: '/pos', scope: '/pos', display: 'standalone', background_color: '#0F6E56', theme_color: '#0F6E56', lang: 'ar', dir: 'rtl', icons: [{ src: '/pos/icon-512.png', sizes: '512x512', type: 'image/png', purpose: 'any maskable' }, { src: '/pos/icon-512.png', sizes: '192x192', type: 'image/png', purpose: 'any' }] });
 
 const POS_HTML = `<!doctype html>
 <html lang="ar" dir="rtl"><head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
 <meta name="theme-color" content="#0F6E56"><link rel="manifest" href="/pos/manifest.webmanifest">
 <meta name="apple-mobile-web-app-capable" content="yes"><meta name="apple-mobile-web-app-title" content="القدس محل">
-<link rel="icon" href="/qods/icon-512.png"><link rel="apple-touch-icon" href="/qods/icon-512.png"><title>القدس — المحل</title>
+<link rel="icon" href="/pos/icon-512.png"><link rel="apple-touch-icon" href="/pos/icon-512.png"><title>القدس — المحل</title>
 <style>
  :root{--g:#0F6E56;--gd:#085041;--gl:#E1F5EE;--red:#A32D2D;--redl:#FCEBEB;--bg:#f4f5f3;--card:#fff;--line:#e5e5e0;--mut:#6b6b66;--txt:#1c1c1a}
  *{box-sizing:border-box}body{margin:0;font-family:system-ui,-apple-system,"Segoe UI",Tahoma,Arial,sans-serif;background:var(--bg);color:var(--txt)}
