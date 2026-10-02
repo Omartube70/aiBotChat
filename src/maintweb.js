@@ -20,6 +20,7 @@
  *   POST /maint/api/photo           { bid, b64, mime, caption }    [إدارة]
  */
 import { loadMaint, saveMaint, cairoNow, MONTHS_AR } from './maintenance.js';
+import { ICON_PNG_B64 } from './mainticon.js';
 
 const PHOTO_KEY = (id) => `maint:photo:${id}`;
 const TOKEN_TTL = 30 * 24 * 3600; // 30 يوم
@@ -93,6 +94,12 @@ export async function handleMaintWeb(request, url, env) {
   }
   if (pathname === '/maint/manifest.webmanifest') {
     return new Response(MANIFEST, { headers: { 'Content-Type': 'application/manifest+json; charset=utf-8' } });
+  }
+  if (pathname === '/maint/icon.svg') {
+    return new Response(ICON_SVG, { headers: { 'Content-Type': 'image/svg+xml; charset=utf-8', 'Cache-Control': 'public, max-age=86400' } });
+  }
+  if (pathname === '/maint/icon-512.png') {
+    return new Response(b64ToBytes(ICON_PNG_B64), { headers: { 'Content-Type': 'image/png', 'Cache-Control': 'public, max-age=86400' } });
   }
   if (!pathname.startsWith('/maint/api/')) return null;
 
@@ -271,7 +278,7 @@ export async function handleMaintWeb(request, url, env) {
 }
 
 /* ================= Service Worker + Manifest ================= */
-const SW_JS = `const C='maint-v1';
+const SW_JS = `const C='maint-v3';
 self.addEventListener('install',function(e){self.skipWaiting();e.waitUntil(caches.open(C).then(function(c){return c.add('/maint');}));});
 self.addEventListener('activate',function(e){e.waitUntil((async function(){var ks=await caches.keys();await Promise.all(ks.filter(function(k){return k!==C;}).map(function(k){return caches.delete(k);}));await self.clients.claim();})());});
 self.addEventListener('fetch',function(e){
@@ -285,7 +292,23 @@ self.addEventListener('fetch',function(e){
 const MANIFEST = JSON.stringify({
   name: 'صيانة توب باور', short_name: 'الصيانة', start_url: '/maint', scope: '/maint',
   display: 'standalone', background_color: '#0F6E56', theme_color: '#0F6E56', lang: 'ar', dir: 'rtl',
+  icons: [
+    { src: '/maint/icon-512.png', sizes: '512x512', type: 'image/png', purpose: 'any maskable' },
+    { src: '/maint/icon-512.png', sizes: '192x192', type: 'image/png', purpose: 'any' },
+    { src: '/maint/icon.svg', sizes: 'any', type: 'image/svg+xml', purpose: 'any' },
+  ],
 });
+
+const ICON_SVG = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+<rect width="512" height="512" rx="104" fill="#0F6E56"/>
+<rect x="150" y="104" width="212" height="316" rx="12" fill="#E1F5EE"/>
+<g fill="#0F6E56">
+<rect x="182" y="140" width="40" height="40" rx="5"/><rect x="236" y="140" width="40" height="40" rx="5"/><rect x="290" y="140" width="40" height="40" rx="5"/>
+<rect x="182" y="198" width="40" height="40" rx="5"/><rect x="236" y="198" width="40" height="40" rx="5"/><rect x="290" y="198" width="40" height="40" rx="5"/>
+<rect x="182" y="256" width="40" height="40" rx="5"/><rect x="236" y="256" width="40" height="40" rx="5"/><rect x="290" y="256" width="40" height="40" rx="5"/>
+<rect x="224" y="330" width="64" height="90" rx="6"/>
+</g>
+</svg>`;
 
 /* ================= واجهة السيستم (صفحة واحدة) ================= */
 const APP_HTML = `<!doctype html>
@@ -294,7 +317,12 @@ const APP_HTML = `<!doctype html>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
 <meta name="theme-color" content="#0F6E56">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="الصيانة">
 <link rel="manifest" href="/maint/manifest.webmanifest">
+<link rel="icon" href="/maint/icon.svg">
+<link rel="apple-touch-icon" href="/maint/icon-512.png">
 <title>صيانة توب باور</title>
 <style>
   :root{--g:#0F6E56;--gd:#085041;--gl:#E1F5EE;--red:#A32D2D;--redl:#FCEBEB;--amb:#854F0B;--ambl:#FAEEDA;--bg:#f4f5f3;--card:#fff;--line:#e5e5e0;--mut:#6b6b66;--txt:#1c1c1a}
@@ -352,7 +380,7 @@ const APP_HTML = `<!doctype html>
 <div class="overlay" id="ov"><div class="sheet" id="sheet"></div></div>
 <script>
 var T=localStorage.getItem('maint_token')||'', ROLE=localStorage.getItem('maint_role')||'';
-var MONTH=0, ZONE='', Q='', FAULTSONLY=false, CUR=null, SUM=null, LIST=[], DET={}, OFF=false;
+var MONTH=0, SELMONTH=lsGet('maint_selmonth')||0, ZONE='', Q='', FAULTSONLY=false, CUR=null, SUM=null, LIST=[], DET={}, OFF=false;
 var MON=['يناير','فبراير','مارس','ابريل','مايو','يونيو','يوليو','اغسطس','سبتمبر','اكتوبر','نوفمبر','ديسمبر'];
 var MSH=['ينا','فبر','مار','ابر','ماي','يون','يول','اغس','سبت','اكت','نوف','ديس'];
 var EVT={fault:'🔴 عطل',problem:'⚠️ مشكلة',measure:'📐 مقايسة',part:'🔩 قطعة غيار',maintenance:'🔧 صيانة اتعملت',pending:'📌 مطلوب',note:'📝 مذكرة',photo:'📷 صورة',payment:'💵 دفع'};
@@ -423,7 +451,8 @@ function renderHome(){
   FAULTSONLY=false;
   el('app').innerHTML='<header><div class="t">🏢 صيانة توب باور</div><span class="badge" id="mlabel">...</span></header><div class="netbar" id="netbar"></div><div class="pad" id="body"><div class="empty">بحمّل...</div></div>';
   updateNet();flush();
-  Promise.all([apiGet('summary'),apiGet('buildings')]).then(function(res){
+  var mp=SELMONTH?('?month='+SELMONTH):'';
+  Promise.all([apiGet('summary'+mp),apiGet('buildings'+mp)]).then(function(res){
     SUM=res[0];LIST=res[1].buildings||[];MONTH=SUM.month;OFF=false;
     lsSet('maint_sum',SUM);lsSet('maint_list',LIST);lsSet('maint_month',MONTH);
     paintHome();
@@ -443,7 +472,7 @@ function recompute(){ // يحدّث أرقام الملخص من القائمة 
 }
 function paintHome(){
   recompute();
-  el('mlabel').textContent=SUM.monthName||'';updateNet();
+  el('mlabel').textContent=(SUM.monthName||'')+' ▾';el('mlabel').style.cursor='pointer';el('mlabel').onclick=changeMonth;updateNet();
   var h='<div class="cards">'+card('المطلوب',money(SUM.expected),'')+card('المتحصّل',money(SUM.collected),'green')+card('المتبقّي',money((SUM.expected||0)-(SUM.collected||0)),'redc')+card('ما دفعوش',SUM.unpaidCount,'redc')+'</div>';
   h+='<div class="actions"><button class="btn sm" id="faultsBtn">🔴 أعطال ('+SUM.faults+')</button>'+(ROLE==='admin'?'<button class="btn sm o" id="bcBtn">📢 تحذير جماعي</button><button class="btn sm o" id="addBtn">+ عملية</button>':'')+'<button class="btn sm o" id="logoutBtn">خروج</button></div>';
   h+='<div class="search">🔎<input id="q" placeholder="دوّر على عمارة (زي 90ج)"></div>';
@@ -463,6 +492,14 @@ function paintHome(){
   loadList();
 }
 function card(l,v,cls){return '<div class="c"><div class="l">'+l+'</div><div class="v '+cls+'">'+v+'</div></div>';}
+function changeMonth(){
+  var h='<header><div class="t">اختار الشهر</div><span class="badge" id="closeB" style="cursor:pointer">✕</span></header><div class="pad"><div class="months" id="mpick">';
+  for(var m=1;m<=12;m++){var on=(m===MONTH);h+='<div class="mo '+(on?'pd':'')+'" data-m="'+m+'" style="cursor:pointer;font-size:14px;padding:15px 0">'+MON[m-1]+'</div>';}
+  h+='</div><div class="muted" style="text-align:center">الشهر الأخضر هو اللي إنت شايفه دلوقتي</div></div>';
+  el('sheet').innerHTML=h;el('ov').style.display='flex';
+  el('closeB').addEventListener('click',function(){el('ov').style.display='none';});
+  el('mpick').addEventListener('click',function(e){var c=e.target.closest('.mo');if(!c)return;var m=Number(c.getAttribute('data-m'));SELMONTH=m;lsSet('maint_selmonth',m);el('ov').style.display='none';renderHome();});
+}
 function loadList(){
   var q=(Q||'').trim().toLowerCase();
   var list=LIST.filter(function(b){
