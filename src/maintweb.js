@@ -1,13 +1,17 @@
 /**
  * سيستم الصيانة (ويب) — نفس داتا البوت (maint:data في KV/D1).
  * صفحة واحدة + API تحت /maint. دخول بكود: كود إدارة (كتابة) وكود مشاهدة (قراءة بس).
+ * بيشتغل أوفلاين (Service Worker + طابور رفع محلي يترفع أول ما النت يرجع).
  *
  * المسارات:
  *   GET  /maint                     صفحة السيستم
+ *   GET  /maint/sw.js               Service Worker (تشغيل أوفلاين)
+ *   GET  /maint/manifest.webmanifest
  *   POST /maint/api/login           { code } → { role, token }
  *   GET  /maint/api/summary         إجماليات الشهر الحالي + المناطق
- *   GET  /maint/api/buildings       ?zone=&q=  قائمة مختصرة
+ *   GET  /maint/api/buildings       قائمة مختصرة (كلها — الفلترة بتتعمل في المتصفح)
  *   GET  /maint/api/building        ?id=       ملف كامل
+ *   GET  /maint/api/broadcast       أرقام رؤساء الاتحادات
  *   POST /maint/api/pay             { id, month, amount }           [إدارة]
  *   POST /maint/api/event           { id, type, text }             [إدارة]
  *   POST /maint/api/set             { id, field, value }           [إدارة]
@@ -84,6 +88,12 @@ export async function handleMaintWeb(request, url, env) {
   if (pathname === '/maint' || pathname === '/maint/') {
     return new Response(APP_HTML, { headers: { 'Content-Type': 'text/html; charset=utf-8' } });
   }
+  if (pathname === '/maint/sw.js') {
+    return new Response(SW_JS, { headers: { 'Content-Type': 'text/javascript; charset=utf-8', 'Service-Worker-Allowed': '/maint', 'Cache-Control': 'no-cache' } });
+  }
+  if (pathname === '/maint/manifest.webmanifest') {
+    return new Response(MANIFEST, { headers: { 'Content-Type': 'application/manifest+json; charset=utf-8' } });
+  }
   if (!pathname.startsWith('/maint/api/')) return null;
 
   // تسجيل الدخول
@@ -124,15 +134,11 @@ export async function handleMaintWeb(request, url, env) {
 
   if (pathname === '/maint/api/buildings' && method === 'GET') {
     const m = Number(url.searchParams.get('month')) || now.m;
-    const zone = url.searchParams.get('zone') || '';
-    const q = (url.searchParams.get('q') || '').trim().toLowerCase();
     let list = data.buildings.filter((b) => b.active !== false);
-    if (zone) list = list.filter((b) => b.zone === zone);
-    if (q) list = list.filter((b) => (b.num + ' ' + (b.name || '')).toLowerCase().includes(q));
     list = list.sort((a, b) => String(a.zone).localeCompare(String(b.zone), 'ar') || (a.number || 0) - (b.number || 0));
     return json({
-      ok: true,
-      buildings: list.slice(0, 500).map((b) => ({
+      ok: true, month: m,
+      buildings: list.slice(0, 1000).map((b) => ({
         id: b.id, num: b.num, zone: b.zone, name: b.name || '', value: b.value, paid: b.paid,
         paidThisMonth: monthStatus(b, m), fault: hasOpenFault(b),
       })),
@@ -156,7 +162,7 @@ export async function handleMaintWeb(request, url, env) {
     b.months = b.months || {};
     b.months[m] = amount;
     b.events = b.events || [];
-    b.events.push({ type: 'payment', text: `اتحصّل ${amount} ج عن ${MONTHS_AR[m - 1]}`, amount, month: m, by: role, at: now.iso });
+    b.events.push({ type: 'payment', text: `اتحصّل ${amount} ج عن ${MONTHS_AR[m - 1]}`, amount, month: m, by: role, at: body.at || now.iso });
     b.updatedAt = now.iso;
     await saveMaint(env, data);
     return json({ ok: true, building: b });
@@ -171,7 +177,7 @@ export async function handleMaintWeb(request, url, env) {
     const text = String(body.text || '').trim();
     if (!text && type !== 'maintenance') return json({ ok: false, error: 'اكتب التفاصيل' }, 400);
     b.events = b.events || [];
-    b.events.push({ type, text: text || 'اتعملت صيانة', by: role, at: now.iso });
+    b.events.push({ type, text: text || 'اتعملت صيانة', by: role, at: body.at || now.iso });
     b.updatedAt = now.iso;
     await saveMaint(env, data);
     return json({ ok: true, building: b });
@@ -211,8 +217,7 @@ export async function handleMaintWeb(request, url, env) {
       id: `b${++data.seq}`, key, num, number: zm ? Number(zm[1]) : null, zone: zm ? (zm[2] === 'ا' ? 'أ' : zm[2]) : '',
       name: body.name || '', address: body.address || '', value: Number(body.value) || 0, paid: Number(body.paid) || 0,
       guard: (Number(body.value) || 0) - (Number(body.paid) || 0), collector: body.collector || '',
-      unionHead: body.unionHead || '', unionPhone: String(body.unionPhone || '').replace(/[^\d+]/g, ''),
-      driveFolder: body.driveFolder || '', active: true, year: now.y, months: {}, events: [], photos: [],
+      contacts: [], driveFolder: body.driveFolder || '', active: true, year: now.y, months: {}, events: [], photos: [],
       createdAt: now.iso, updatedAt: now.iso,
     };
     data.buildings.push(b);
@@ -221,15 +226,20 @@ export async function handleMaintWeb(request, url, env) {
   }
 
   if (pathname === '/maint/api/broadcast' && method === 'GET') {
-    const phones = [];
     const contactsOf = (b) => (Array.isArray(b.contacts) && b.contacts.length ? b.contacts : (b.unionHead || b.unionPhone ? [{ name: b.unionHead, phone: b.unionPhone }] : []));
+    const out = [];
+    const seen = new Set();
     for (const b of data.buildings) {
       if (b.active === false) continue;
-      for (const c of contactsOf(b)) if (c.phone) phones.push({ num: b.num, name: c.name || '', phone: String(c.phone).replace(/[^\d]/g, '').replace(/^0/, '20') });
+      for (const c of contactsOf(b)) {
+        if (!c.phone) continue;
+        const phone = String(c.phone).replace(/[^\d]/g, '').replace(/^0/, '20');
+        if (seen.has(phone)) continue;
+        seen.add(phone);
+        out.push({ num: b.num, name: c.name || '', phone });
+      }
     }
-    const seen = new Set();
-    const uniq = phones.filter((p) => (seen.has(p.phone) ? false : (seen.add(p.phone), true)));
-    return json({ ok: true, count: uniq.length, contacts: uniq });
+    return json({ ok: true, count: out.length, contacts: out });
   }
 
   if (pathname === '/maint/api/photo' && method === 'GET') {
@@ -248,10 +258,10 @@ export async function handleMaintWeb(request, url, env) {
     const pid = `p${Date.now().toString(36)}${Math.floor(Math.random() * 1e4)}`;
     await env.MEMORY.put(PHOTO_KEY(pid), JSON.stringify({ b64, mime: body.mime || 'image/jpeg' }));
     b.photos = b.photos || [];
-    b.photos.push({ id: pid, mime: body.mime || 'image/jpeg', caption: String(body.caption || ''), at: now.iso, by: role });
+    b.photos.push({ id: pid, mime: body.mime || 'image/jpeg', caption: String(body.caption || ''), at: body.at || now.iso, by: role });
     while (b.photos.length > 20) { const old = b.photos.shift(); await env.MEMORY.delete(PHOTO_KEY(old.id)).catch(() => {}); }
     b.events = b.events || [];
-    b.events.push({ type: 'photo', text: 'صورة' + (body.caption ? ' — ' + body.caption : ''), by: role, at: now.iso });
+    b.events.push({ type: 'photo', text: 'صورة' + (body.caption ? ' — ' + body.caption : ''), by: role, at: body.at || now.iso });
     b.updatedAt = now.iso;
     await saveMaint(env, data);
     return json({ ok: true, building: b });
@@ -260,21 +270,43 @@ export async function handleMaintWeb(request, url, env) {
   return json({ ok: false, error: 'مسار غير معروف' }, 404);
 }
 
+/* ================= Service Worker + Manifest ================= */
+const SW_JS = `const C='maint-v1';
+self.addEventListener('install',function(e){self.skipWaiting();e.waitUntil(caches.open(C).then(function(c){return c.add('/maint');}));});
+self.addEventListener('activate',function(e){e.waitUntil((async function(){var ks=await caches.keys();await Promise.all(ks.filter(function(k){return k!==C;}).map(function(k){return caches.delete(k);}));await self.clients.claim();})());});
+self.addEventListener('fetch',function(e){
+  var u=new URL(e.request.url);
+  if(e.request.method!=='GET')return;
+  if(u.pathname==='/maint'||u.pathname==='/maint/'){
+    e.respondWith((async function(){try{var r=await fetch(e.request);var c=await caches.open(C);c.put('/maint',r.clone());return r;}catch(err){var m=await caches.match('/maint');return m||new Response('offline',{status:503});}})());
+  }
+});`;
+
+const MANIFEST = JSON.stringify({
+  name: 'صيانة توب باور', short_name: 'الصيانة', start_url: '/maint', scope: '/maint',
+  display: 'standalone', background_color: '#0F6E56', theme_color: '#0F6E56', lang: 'ar', dir: 'rtl',
+});
+
 /* ================= واجهة السيستم (صفحة واحدة) ================= */
 const APP_HTML = `<!doctype html>
 <html lang="ar" dir="rtl">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
+<meta name="theme-color" content="#0F6E56">
+<link rel="manifest" href="/maint/manifest.webmanifest">
 <title>صيانة توب باور</title>
 <style>
-  :root{--g:#0F6E56;--gd:#085041;--gl:#E1F5EE;--red:#A32D2D;--redl:#FCEBEB;--bg:#f4f5f3;--card:#fff;--line:#e5e5e0;--mut:#6b6b66;--txt:#1c1c1a}
+  :root{--g:#0F6E56;--gd:#085041;--gl:#E1F5EE;--red:#A32D2D;--redl:#FCEBEB;--amb:#854F0B;--ambl:#FAEEDA;--bg:#f4f5f3;--card:#fff;--line:#e5e5e0;--mut:#6b6b66;--txt:#1c1c1a}
   *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
   body{margin:0;font-family:system-ui,-apple-system,"Segoe UI",Tahoma,Arial,sans-serif;background:var(--bg);color:var(--txt);font-size:16px}
   .wrap{max-width:560px;margin:0 auto;min-height:100vh;background:var(--bg)}
   header{position:sticky;top:0;z-index:10;background:var(--g);color:var(--gl);padding:12px 16px;display:flex;align-items:center;justify-content:space-between}
   header .t{font-size:17px;font-weight:600}
   .badge{font-size:12px;background:var(--gd);padding:4px 10px;border-radius:20px}
+  .netbar{font-size:13px;text-align:center;padding:7px 12px;display:none}
+  .netbar.off{display:block;background:var(--ambl);color:var(--amb)}
+  .netbar.pend{display:block;background:var(--gl);color:var(--g)}
   .pad{padding:14px 16px}
   .cards{display:grid;grid-template-columns:repeat(2,1fr);gap:10px;margin-bottom:14px}
   .c{background:var(--card);border-radius:12px;padding:12px}
@@ -319,17 +351,59 @@ const APP_HTML = `<!doctype html>
 <div class="wrap" id="app"><div class="empty">...</div></div>
 <div class="overlay" id="ov"><div class="sheet" id="sheet"></div></div>
 <script>
-var T=localStorage.getItem('maint_token')||'', ROLE=localStorage.getItem('maint_role')||'', MONTH=0, ZONE='', Q='', FAULTSONLY=false, CUR=null;
+var T=localStorage.getItem('maint_token')||'', ROLE=localStorage.getItem('maint_role')||'';
+var MONTH=0, ZONE='', Q='', FAULTSONLY=false, CUR=null, SUM=null, LIST=[], DET={}, OFF=false;
 var MON=['يناير','فبراير','مارس','ابريل','مايو','يونيو','يوليو','اغسطس','سبتمبر','اكتوبر','نوفمبر','ديسمبر'];
 var MSH=['ينا','فبر','مار','ابر','ماي','يون','يول','اغس','سبت','اكت','نوف','ديس'];
 var EVT={fault:'🔴 عطل',problem:'⚠️ مشكلة',measure:'📐 مقايسة',part:'🔩 قطعة غيار',maintenance:'🔧 صيانة اتعملت',pending:'📌 مطلوب',note:'📝 مذكرة',photo:'📷 صورة',payment:'💵 دفع'};
 function esc(s){return String(s==null?'':s).replace(/[<>&"]/g,function(c){return {'<':'&lt;','>':'&gt;','&':'&amp;','"':'&quot;'}[c];});}
 function money(n){return (Math.round(Number(n)||0)).toLocaleString('en-US');}
 function el(id){return document.getElementById(id);}
-function api(path,opts){opts=opts||{};opts.headers=opts.headers||{};if(T)opts.headers.Authorization='Bearer '+T;if(opts.body){opts.headers['Content-Type']='application/json';opts.body=JSON.stringify(opts.body);}return fetch('/maint/api/'+path,opts).then(function(r){if(r.status===401){logout();throw new Error('login');}return r.json();});}
-function logout(){localStorage.removeItem('maint_token');localStorage.removeItem('maint_role');T='';ROLE='';renderLogin();}
 function dlabel(iso){try{var d=new Date(iso);return d.getUTCDate()+'/'+(d.getUTCMonth()+1);}catch(e){return '';}}
+function lsGet(k){try{var v=localStorage.getItem(k);return v?JSON.parse(v):null;}catch(e){return null;}}
+function lsSet(k,v){try{localStorage.setItem(k,JSON.stringify(v));return true;}catch(e){return false;}}
 
+function logout(){localStorage.removeItem('maint_token');localStorage.removeItem('maint_role');T='';ROLE='';renderLogin();}
+
+/* ---- شبكة ---- */
+function apiGet(path){
+  return fetch('/maint/api/'+path,{headers:{Authorization:'Bearer '+T}}).then(function(r){
+    if(r.status===401){logout();throw new Error('login');}
+    return r.json();
+  });
+}
+/* طابور الكتابة (أوفلاين) */
+function queue(){return lsGet('maint_q')||[];}
+function setQueue(q){lsSet('maint_q',q);updateNet();}
+function enqueue(path,body){var q=queue();q.push({path:path,body:body,ts:Date.now()});var ok=lsSet('maint_q',q);updateNet();flush();return ok;}
+var flushing=false;
+function flush(cb){
+  if(flushing){if(cb)cb();return;}
+  var q=queue();if(!q.length){OFF=false;updateNet();if(cb)cb();return;}
+  flushing=true;var i=0;
+  function step(){
+    if(i>=q.length){flushing=false;setQueue([]);OFF=false;updateNet();if(cb)cb();return;}
+    var it=q[i];
+    fetch('/maint/api/'+it.path,{method:'POST',headers:{'Content-Type':'application/json',Authorization:'Bearer '+T},body:JSON.stringify(it.body)})
+      .then(function(r){
+        if(r.status===401){flushing=false;logout();return;}
+        i++;step(); // 2xx أو 4xx: نعدّي (الغلط مننا مش من النت)
+      })
+      .catch(function(){ // مفيش نت: نسيب الباقي للمرة الجاية
+        flushing=false;OFF=true;setQueue(q.slice(i));if(cb)cb();
+      });
+  }
+  step();
+}
+function updateNet(){
+  var bar=el('netbar');if(!bar)return;
+  var n=queue().length;
+  if(OFF||!navigator.onLine){bar.className='netbar off';bar.textContent='📴 مفيش نت — بتسجّل عادي، و'+(n?('هيترفع '+n+' حاجة'):'الرفع')+' أول ما النت يرجع';}
+  else if(n){bar.className='netbar pend';bar.textContent='⏫ بيرفع '+n+' حاجة...';}
+  else{bar.className='netbar';bar.textContent='';}
+}
+
+/* ---- دخول ---- */
 function renderLogin(){
   el('app').innerHTML='<div class="center"><div class="login"><div style="font-size:20px;font-weight:600;color:var(--g)">🏢 صيانة توب باور</div><div class="muted" style="margin-top:6px">اكتب كود الدخول</div><input id="code" type="tel" inputmode="numeric" placeholder="كود" maxlength="8"><div class="err" id="lerr"></div><button class="btn" style="width:100%" id="loginBtn">دخول</button></div></div>';
   var i=el('code');i.focus();
@@ -344,114 +418,156 @@ function doLogin(){
   }).catch(function(){el('lerr').textContent='حصلت مشكلة، جرّب تاني';});
 }
 
+/* ---- الرئيسية ---- */
 function renderHome(){
   FAULTSONLY=false;
-  el('app').innerHTML='<header><div class="t">🏢 صيانة توب باور</div><span class="badge" id="mlabel">...</span></header><div class="pad" id="body"><div class="empty">بحمّل...</div></div>';
-  api('summary').then(function(s){
-    MONTH=s.month;el('mlabel').textContent=s.monthName;
-    var h='<div class="cards">'+card('المطلوب',money(s.expected),'')+card('المتحصّل',money(s.collected),'green')+card('المتبقّي',money(s.due),'redc')+card('ما دفعوش',s.unpaidCount,'redc')+'</div>';
-    h+='<div class="actions"><button class="btn sm" id="faultsBtn">🔴 أعطال ('+s.faults+')</button>'+(ROLE==='admin'?'<button class="btn sm o" id="bcBtn">📢 تحذير جماعي</button><button class="btn sm o" id="addBtn">+ عملية</button>':'')+'<button class="btn sm o" id="logoutBtn">خروج</button></div>';
-    h+='<div class="search">🔎<input id="q" placeholder="دوّر على عمارة (زي 90ج)"></div>';
-    h+='<div class="chips" id="chips"></div><div id="list"><div class="empty">بحمّل...</div></div>';
-    el('body').innerHTML=h;
-    el('q').value=Q;
-    el('logoutBtn').addEventListener('click',logout);
-    el('faultsBtn').addEventListener('click',function(){FAULTSONLY=!FAULTSONLY;loadList();});
-    if(ROLE==='admin'){el('addBtn').addEventListener('click',addBuilding);el('bcBtn').addEventListener('click',broadcast);}
-    var chips='<span class="chip '+(ZONE===''?'on':'')+'" data-z="">الكل</span>';
-    s.zones.forEach(function(z){chips+='<span class="chip '+(ZONE===z.zone?'on':'')+'" data-z="'+esc(z.zone)+'">'+esc(z.zone)+' ('+z.count+')</span>';});
-    el('chips').innerHTML=chips;
-    el('chips').addEventListener('click',function(e){var c=e.target.closest('.chip');if(!c)return;ZONE=c.getAttribute('data-z');renderHome();});
-    var qi=el('q'),t;qi.addEventListener('input',function(){clearTimeout(t);Q=qi.value;t=setTimeout(loadList,250);});
-    var listEl=el('list');listEl.addEventListener('click',function(e){var r=e.target.closest('.row');if(r)openB(r.getAttribute('data-id'));});
-    loadList();
-  }).catch(function(){});
+  el('app').innerHTML='<header><div class="t">🏢 صيانة توب باور</div><span class="badge" id="mlabel">...</span></header><div class="netbar" id="netbar"></div><div class="pad" id="body"><div class="empty">بحمّل...</div></div>';
+  updateNet();flush();
+  Promise.all([apiGet('summary'),apiGet('buildings')]).then(function(res){
+    SUM=res[0];LIST=res[1].buildings||[];MONTH=SUM.month;OFF=false;
+    lsSet('maint_sum',SUM);lsSet('maint_list',LIST);lsSet('maint_month',MONTH);
+    paintHome();
+  }).catch(function(){
+    SUM=lsGet('maint_sum');LIST=lsGet('maint_list')||[];MONTH=lsGet('maint_month')||1;OFF=true;
+    if(!SUM){el('body').innerHTML='<div class="empty">محتاج نت أول مرة بس — افتحه وإنت على النت مرة واحدة وبعدها هيشتغل أوفلاين.</div>';return;}
+    paintHome();
+  });
+}
+function recompute(){ // يحدّث أرقام الملخص من القائمة (عشان تعديلات الأوفلاين تبان)
+  if(!SUM)return;
+  var active=LIST.length;
+  SUM.total=active;
+  SUM.unpaidCount=LIST.filter(function(b){return !b.paidThisMonth;}).length;
+  SUM.faults=LIST.filter(function(b){return b.fault;}).length;
+  SUM.expected=LIST.reduce(function(s,b){return s+(Number(b.paid)||0);},0);
+}
+function paintHome(){
+  recompute();
+  el('mlabel').textContent=SUM.monthName||'';updateNet();
+  var h='<div class="cards">'+card('المطلوب',money(SUM.expected),'')+card('المتحصّل',money(SUM.collected),'green')+card('المتبقّي',money((SUM.expected||0)-(SUM.collected||0)),'redc')+card('ما دفعوش',SUM.unpaidCount,'redc')+'</div>';
+  h+='<div class="actions"><button class="btn sm" id="faultsBtn">🔴 أعطال ('+SUM.faults+')</button>'+(ROLE==='admin'?'<button class="btn sm o" id="bcBtn">📢 تحذير جماعي</button><button class="btn sm o" id="addBtn">+ عملية</button>':'')+'<button class="btn sm o" id="logoutBtn">خروج</button></div>';
+  h+='<div class="search">🔎<input id="q" placeholder="دوّر على عمارة (زي 90ج)"></div>';
+  h+='<div class="chips" id="chips"></div><div id="list"></div>';
+  el('body').innerHTML=h;el('q').value=Q;
+  el('logoutBtn').addEventListener('click',logout);
+  el('faultsBtn').addEventListener('click',function(){FAULTSONLY=!FAULTSONLY;loadList();});
+  if(ROLE==='admin'){el('addBtn').addEventListener('click',addBuilding);el('bcBtn').addEventListener('click',broadcast);}
+  var zc={};LIST.forEach(function(b){zc[b.zone||'—']=(zc[b.zone||'—']||0)+1;});
+  var zs=Object.keys(zc).sort();
+  var chips='<span class="chip '+(ZONE===''?'on':'')+'" data-z="">الكل</span>';
+  zs.forEach(function(z){chips+='<span class="chip '+(ZONE===z?'on':'')+'" data-z="'+esc(z)+'">'+esc(z)+' ('+zc[z]+')</span>';});
+  el('chips').innerHTML=chips;
+  el('chips').addEventListener('click',function(e){var c=e.target.closest('.chip');if(!c)return;ZONE=c.getAttribute('data-z');paintHome();});
+  var qi=el('q'),t;qi.addEventListener('input',function(){clearTimeout(t);Q=qi.value;t=setTimeout(loadList,200);});
+  el('list').addEventListener('click',function(e){var r=e.target.closest('.row');if(r)openB(r.getAttribute('data-id'));});
+  loadList();
 }
 function card(l,v,cls){return '<div class="c"><div class="l">'+l+'</div><div class="v '+cls+'">'+v+'</div></div>';}
-
 function loadList(){
-  api('buildings?month='+MONTH+'&zone='+encodeURIComponent(ZONE)+'&q='+encodeURIComponent(Q)).then(function(d){
-    var list=d.buildings||[];if(FAULTSONLY)list=list.filter(function(b){return b.fault;});
-    var elx=el('list');if(!elx)return;
-    if(!list.length){elx.innerHTML='<div class="empty">مفيش عمليات</div>';return;}
-    elx.innerHTML=list.map(function(b){
-      var tags=(b.fault?'<span class="tag tr">🔴 عطل</span>':'')+(b.paidThisMonth?'<span class="tag tg">✓ دفع</span>':'<span class="tag tr">ما دفعش</span>');
-      return '<div class="row" data-id="'+esc(b.id)+'"><div><div class="n">'+esc(b.num)+'</div><div class="s">منطقة '+esc(b.zone)+' · '+money(b.paid)+' ج'+(b.name?' · '+esc(b.name):'')+'</div></div><div style="display:flex;align-items:center">'+tags+'</div></div>';
-    }).join('');
+  var q=(Q||'').trim().toLowerCase();
+  var list=LIST.filter(function(b){
+    if(ZONE&&b.zone!==ZONE)return false;
+    if(FAULTSONLY&&!b.fault)return false;
+    if(q&&((b.num+' '+(b.name||'')).toLowerCase().indexOf(q)<0))return false;
+    return true;
   });
+  var elx=el('list');if(!elx)return;
+  if(!list.length){elx.innerHTML='<div class="empty">مفيش عمليات</div>';return;}
+  elx.innerHTML=list.map(function(b){
+    var tags=(b.fault?'<span class="tag tr">🔴 عطل</span>':'')+(b.paidThisMonth?'<span class="tag tg">✓ دفع</span>':'<span class="tag tr">ما دفعش</span>');
+    return '<div class="row" data-id="'+esc(b.id)+'"><div><div class="n">'+esc(b.num)+'</div><div class="s">منطقة '+esc(b.zone)+' · '+money(b.paid)+' ج'+(b.name?' · '+esc(b.name):'')+'</div></div><div style="display:flex;align-items:center">'+tags+'</div></div>';
+  }).join('');
 }
 
+/* ---- عملية ---- */
 function openB(id){
-  api('building?id='+encodeURIComponent(id)).then(function(d){
-    if(!d.ok)return;var b=d.building;CUR=b;var adm=ROLE==='admin';
-    var cts=(b.contacts&&b.contacts.length)?b.contacts:((b.unionHead||b.unionPhone)?[{name:b.unionHead||'',phone:b.unionPhone||''}]:[]);
-    var uni=cts.length?cts.map(function(c){var w=c.phone?(' <a class="btn sm" target="_blank" href="https://wa.me/'+String(c.phone).replace(/[^0-9]/g,'').replace(/^0/,'20')+'?text='+encodeURIComponent('بخصوص صيانة '+b.num)+'">واتساب</a>'):'';return '👤 '+esc(c.name||'رئيس اتحاد')+(c.phone?' · '+esc(c.phone):'')+w;}).join('<br>'):'<span class="muted">مفيش رئيس اتحاد مسجّل</span>';
-    var h='<header><div class="t">'+esc(b.num)+'</div><span class="badge" id="closeB" style="cursor:pointer">✕ إغلاق</span></header><div class="pad">';
-    h+='<div class="muted">منطقة '+esc(b.zone)+' · القيمة '+money(b.value)+' · المدفوع '+money(b.paid)+' · الغفير '+money(b.guard)+'</div>';
-    h+='<div style="margin:9px 0;line-height:2">'+uni+(adm?' <button class="btn sm o" id="edUnion">تعديل</button>':'')+'</div>';
-    if(b.driveFolder)h+='<div style="margin:6px 0"><a class="btn sm o" target="_blank" href="'+esc(b.driveFolder)+'">📁 فولدر الصور/الفيديو</a></div>';
-    h+='<div class="sec">التحصيل الشهري'+(adm?' — دوس الشهر عشان تسجّل':'')+'</div><div class="months" id="months">';
-    for(var m=1;m<=12;m++){var pd=b.months&&b.months[m]!=null;var cls=pd?'pd':(m<=MONTH?'un':'');h+='<div class="mo '+cls+'" data-m="'+m+'">'+MSH[m-1]+'<br>'+(pd?money(b.months[m]):'—')+'</div>';}
-    h+='</div>';
-    if(adm){h+='<div class="actions" id="evBtns"><button class="btn sm" data-t="fault">🔴 عطل</button><button class="btn sm o" data-t="problem">⚠️ مشكلة</button><button class="btn sm o" data-t="measure">📐 مقايسة</button><button class="btn sm o" data-t="part">🔩 قطعة غيار</button><button class="btn sm o" data-t="maintenance">🔧 صيانة</button><button class="btn sm o" data-t="note">📝 مذكرة</button></div>';}
-    h+='<div class="sec">السجل (الأحدث أولاً)</div>';
-    var evs=(b.events||[]).slice().reverse();
-    h+=evs.length?evs.map(function(e){return '<div class="ev '+(e.type==='fault'?'f':'')+'">'+(EVT[e.type]||'•')+' · '+dlabel(e.at)+' — '+esc(e.text)+(e.by?' ('+esc(e.by)+')':'')+'</div>';}).join(''):'<div class="muted">لسه مفيش</div>';
-    h+='<div class="sec">صور وفيديوهات</div><div class="thumbs" id="thumbs">';
-    (b.photos||[]).forEach(function(p){h+='<img data-src="/maint/api/photo?id='+esc(p.id)+'" src="/maint/api/photo?id='+esc(p.id)+'">';});
-    if(adm)h+='<label class="addp">+<input type="file" accept="image/*" id="upPhoto" style="display:none"></label>';
-    h+='</div></div>';
-    el('sheet').innerHTML=h;el('ov').style.display='flex';
-    el('closeB').addEventListener('click',closeB);
-    if(adm){
-      el('edUnion').addEventListener('click',editUnion);
-      el('months').addEventListener('click',function(e){var c=e.target.closest('.mo');if(c)payMonth(Number(c.getAttribute('data-m')));});
-      el('evBtns').addEventListener('click',function(e){var btn=e.target.closest('button');if(btn)addEv(btn.getAttribute('data-t'));});
-      el('upPhoto').addEventListener('change',function(){upPhoto(this);});
-    }
-    el('thumbs').addEventListener('click',function(e){var im=e.target.closest('img');if(im)window.open(im.getAttribute('data-src'));});
+  apiGet('building?id='+encodeURIComponent(id)).then(function(d){
+    if(!d.ok)throw new Error('x');DET[id]=d.building;lsSet('maint_det_'+id,d.building);renderB(d.building);
+  }).catch(function(){
+    var b=DET[id]||lsGet('maint_det_'+id);
+    if(b)renderB(b);else alert('محتاج نت مرة واحدة تفتح بيها العملية دي الأول.');
   });
 }
-function closeB(){el('ov').style.display='none';CUR=null;}
+function renderB(b){
+  CUR=b;var adm=ROLE==='admin';
+  var cts=(b.contacts&&b.contacts.length)?b.contacts:((b.unionHead||b.unionPhone)?[{name:b.unionHead||'',phone:b.unionPhone||''}]:[]);
+  var uni=cts.length?cts.map(function(c){var w=c.phone?(' <a class="btn sm" target="_blank" href="https://wa.me/'+String(c.phone).replace(/[^0-9]/g,'').replace(/^0/,'20')+'?text='+encodeURIComponent('بخصوص صيانة '+b.num)+'">واتساب</a>'):'';return '👤 '+esc(c.name||'رئيس اتحاد')+(c.phone?' · '+esc(c.phone):'')+w;}).join('<br>'):'<span class="muted">مفيش رئيس اتحاد مسجّل</span>';
+  var h='<header><div class="t">'+esc(b.num)+'</div><span class="badge" id="closeB" style="cursor:pointer">✕ إغلاق</span></header><div class="pad">';
+  h+='<div class="muted">منطقة '+esc(b.zone)+' · القيمة '+money(b.value)+' · المدفوع '+money(b.paid)+' · الغفير '+money(b.guard)+'</div>';
+  h+='<div style="margin:9px 0;line-height:2">'+uni+(adm?' <button class="btn sm o" id="edUnion">تعديل</button>':'')+'</div>';
+  if(b.driveFolder)h+='<div style="margin:6px 0"><a class="btn sm o" target="_blank" href="'+esc(b.driveFolder)+'">📁 فولدر الصور/الفيديو</a></div>';
+  h+='<div class="sec">التحصيل الشهري'+(adm?' — دوس الشهر عشان تسجّل':'')+'</div><div class="months" id="months">';
+  for(var m=1;m<=12;m++){var pd=b.months&&b.months[m]!=null;var cls=pd?'pd':(m<=MONTH?'un':'');h+='<div class="mo '+cls+'" data-m="'+m+'">'+MSH[m-1]+'<br>'+(pd?money(b.months[m]):'—')+'</div>';}
+  h+='</div>';
+  if(adm){h+='<div class="actions" id="evBtns"><button class="btn sm" data-t="fault">🔴 عطل</button><button class="btn sm o" data-t="problem">⚠️ مشكلة</button><button class="btn sm o" data-t="measure">📐 مقايسة</button><button class="btn sm o" data-t="part">🔩 قطعة غيار</button><button class="btn sm o" data-t="maintenance">🔧 صيانة</button><button class="btn sm o" data-t="note">📝 مذكرة</button></div>';}
+  h+='<div class="sec">السجل (الأحدث أولاً)</div>';
+  var evs=(b.events||[]).slice().reverse();
+  h+=evs.length?evs.map(function(e){return '<div class="ev '+(e.type==='fault'?'f':'')+'">'+(EVT[e.type]||'•')+' · '+dlabel(e.at)+' — '+esc(e.text)+(e.by?' ('+esc(e.by)+')':'')+'</div>';}).join(''):'<div class="muted">لسه مفيش</div>';
+  h+='<div class="sec">صور وفيديوهات</div><div class="thumbs" id="thumbs">';
+  (b.photos||[]).forEach(function(p){h+='<img data-src="/maint/api/photo?id='+esc(p.id)+'" src="/maint/api/photo?id='+esc(p.id)+'">';});
+  if(adm)h+='<label class="addp">+<input type="file" accept="image/*" id="upPhoto" style="display:none"></label>';
+  h+='</div></div>';
+  el('sheet').innerHTML=h;el('ov').style.display='flex';
+  el('closeB').addEventListener('click',closeB);
+  if(adm){
+    el('edUnion').addEventListener('click',editUnion);
+    el('months').addEventListener('click',function(e){var c=e.target.closest('.mo');if(c)payMonth(Number(c.getAttribute('data-m')));});
+    el('evBtns').addEventListener('click',function(e){var btn=e.target.closest('button');if(btn)addEv(btn.getAttribute('data-t'));});
+    el('upPhoto').addEventListener('change',function(){upPhoto(this);});
+  }
+  el('thumbs').addEventListener('click',function(e){var im=e.target.closest('img');if(im)window.open(im.getAttribute('data-src'));});
+}
+function closeB(){el('ov').style.display='none';CUR=null;paintHome();}
 
+/* ---- كتابة (تشتغل أوفلاين) ---- */
+function saveCur(){DET[CUR.id]=CUR;lsSet('maint_det_'+CUR.id,CUR);}
+function listItem(id){for(var i=0;i<LIST.length;i++)if(LIST[i].id===id)return LIST[i];return null;}
 function payMonth(m){
   var def=(CUR&&CUR.paid)||'';
   var v=prompt('العمارة '+CUR.num+' — دفعت كام عن '+MON[m-1]+'؟',def);
   if(v==null)return;var amount=Number(String(v).replace(/[^0-9.]/g,''));if(isNaN(amount))return;
-  api('pay',{method:'POST',body:{id:CUR.id,month:m,amount:amount}}).then(function(d){if(d.ok)openB(CUR.id);else alert(d.error||'مشكلة');});
+  CUR.months=CUR.months||{};CUR.months[m]=amount;
+  (CUR.events=CUR.events||[]).push({type:'payment',text:'اتحصّل '+amount+' ج عن '+MON[m-1],amount:amount,month:m,by:ROLE,at:new Date().toISOString()});
+  if(m===MONTH){var li=listItem(CUR.id);if(li)li.paidThisMonth=true;if(SUM)SUM.collected=(SUM.collected||0)+amount;}
+  saveCur();enqueue('pay',{id:CUR.id,month:m,amount:amount,at:new Date().toISOString()});renderB(CUR);
 }
 function addEv(type){
   var label=EVT[type]||'';
   var text=type==='maintenance'?(prompt('تفاصيل الصيانة (أو سيبها فاضية):','')||''):prompt(label+' — اكتب التفاصيل:','');
   if(text==null&&type!=='maintenance')return;
-  api('event',{method:'POST',body:{id:CUR.id,type:type,text:text}}).then(function(d){if(d.ok)openB(CUR.id);else alert(d.error||'مشكلة');});
+  (CUR.events=CUR.events||[]).push({type:type,text:text||'اتعملت صيانة',by:ROLE,at:new Date().toISOString()});
+  var li=listItem(CUR.id);if(li){if(type==='fault')li.fault=true;if(type==='maintenance')li.fault=false;}
+  saveCur();enqueue('event',{id:CUR.id,type:type,text:text,at:new Date().toISOString()});renderB(CUR);
 }
 function editUnion(){
-  var cts=(CUR.contacts&&CUR.contacts.length)?CUR.contacts:((CUR.unionHead||CUR.unionPhone)?[{name:CUR.unionHead||'',phone:CUR.unionPhone||''}]:[]);
+  var cts=(CUR.contacts&&CUR.contacts.length)?CUR.contacts:[];
   var n1=prompt('اسم رئيس الاتحاد (1):',(cts[0]&&cts[0].name)||'');if(n1==null)return;
   var p1=prompt('تليفونه (1):',(cts[0]&&cts[0].phone)||'');if(p1==null)return;
   var n2=prompt('اسم رئيس اتحاد تاني (2) — سيبها فاضية لو مفيش:',(cts[1]&&cts[1].name)||'');if(n2==null)return;
   var p2=prompt('تليفونه (2):',(cts[1]&&cts[1].phone)||'');if(p2==null)return;
   var arr=[{name:n1,phone:p1}];if(n2||p2)arr.push({name:n2,phone:p2});
-  var id=CUR.id;
-  api('set',{method:'POST',body:{id:id,field:'contacts',value:arr}}).then(function(d){if(d.ok)openB(id);else alert(d.error||'مشكلة');});
+  CUR.contacts=arr;saveCur();enqueue('set',{id:CUR.id,field:'contacts',value:arr});renderB(CUR);
 }
 function upPhoto(inp){
-  var f=inp.files[0];if(!f)return;var id=CUR.id;var rd=new FileReader();
+  var f=inp.files[0];if(!f)return;var rd=new FileReader();
   rd.onload=function(){var b64=String(rd.result).split(',')[1];var cap=prompt('تعليق على الصورة (اختياري):','')||'';
-    api('photo',{method:'POST',body:{bid:id,b64:b64,mime:f.type||'image/jpeg',caption:cap}}).then(function(d){if(d.ok)openB(id);else alert(d.error||'مشكلة');});};
+    if(!navigator.onLine){alert('الصور محتاجة نت 🙏 (التسجيل والأعطال بيشتغلوا أوفلاين).');return;}
+    fetch('/maint/api/photo',{method:'POST',headers:{'Content-Type':'application/json',Authorization:'Bearer '+T},body:JSON.stringify({bid:CUR.id,b64:b64,mime:f.type||'image/jpeg',caption:cap})})
+      .then(function(r){return r.json();}).then(function(d){if(d.ok){DET[CUR.id]=d.building;renderB(d.building);}else alert(d.error||'مشكلة');})
+      .catch(function(){alert('مفيش نت — الصور محتاجة نت.');});};
   rd.readAsDataURL(f);
 }
 function addBuilding(){
   var num=prompt('رقم العملية الجديدة (زي 90ج):','');if(!num)return;
   var value=prompt('القيمة الكاملة:','250');if(value==null)return;
   var paid=prompt('المدفوع (الصافي بعد الغفير):','200');if(paid==null)return;
-  api('add',{method:'POST',body:{num:num,value:Number(value),paid:Number(paid)}}).then(function(d){if(d.ok)renderHome();else alert(d.error||'مشكلة');});
+  fetch('/maint/api/add',{method:'POST',headers:{'Content-Type':'application/json',Authorization:'Bearer '+T},body:JSON.stringify({num:num,value:Number(value),paid:Number(paid)})})
+    .then(function(r){return r.json();}).then(function(d){if(d.ok)renderHome();else alert(d.error||'مشكلة');})
+    .catch(function(){alert('إضافة عملية جديدة محتاجة نت.');});
 }
-
 function broadcast(){
-  api('broadcast').then(function(d){
-    if(!d.count){alert('مفيش تليفونات رؤساء اتحاد مسجّلة لسه. سجّلهم الأول.');return;}
+  apiGet('broadcast').then(function(d){
+    if(!d.count){alert('مفيش تليفونات رؤساء اتحاد مسجّلة لسه.');return;}
     var msg=prompt('اكتب التحذير اللي هيتبعت لكل العماير:','تنبيه: برجاء فصل المصاعد لحين انتهاء الأمطار.');
     if(msg==null)return;
     var nums=d.contacts.map(function(c){return c.phone;}).join(', ');
@@ -463,9 +579,12 @@ function broadcast(){
     el('sheet').innerHTML=html;el('ov').style.display='flex';
     el('closeB').addEventListener('click',closeB);
     el('copyNums').addEventListener('click',function(){var ta=el('bcnums');ta.select();try{document.execCommand('copy');this.textContent='اتنسخ ✓';}catch(e){}});
-  });
+  }).catch(function(){alert('التحذير الجماعي محتاج نت.');});
 }
 
+window.addEventListener('online',function(){OFF=false;flush(function(){if(el('mlabel'))renderHome();});});
+window.addEventListener('offline',function(){OFF=true;updateNet();});
+if('serviceWorker' in navigator){navigator.serviceWorker.register('/maint/sw.js',{scope:'/maint'}).catch(function(){});}
 if(T&&ROLE)renderHome();else renderLogin();
 </script>
 </body>
