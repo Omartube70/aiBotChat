@@ -77,6 +77,7 @@ import {
 import { handleMaintWeb } from './maintweb.js';
 import { handleQodsWeb } from './qods.js';
 import { handleTopPowerWeb } from './toppower.js';
+import { handleQodsPos } from './qodspos.js';
 import { syncGoogleContacts, getContactInfo, startConnect, finishConnect } from './contacts.js';
 import { noteError, noteFailedStatuses, flushDiag, diagPage, maskPhone } from './diag.js';
 import { sendMessengerText, parseMessengerIncoming } from './messenger.js';
@@ -158,6 +159,11 @@ export default {
     // توب باور — صفحة عامة (تركيب وصيانة)
     if (['/tp', '/toppower'].includes(pathname) || pathname.startsWith('/tp/') || pathname.startsWith('/toppower/')) {
       const r = handleTopPowerWeb(request, url);
+      if (r) return r;
+    }
+    // القدس — برنامج المحل (كاشير)
+    if (pathname === '/pos' || pathname.startsWith('/pos/')) {
+      const r = await handleQodsPos(request, url, env);
       if (r) return r;
     }
 
