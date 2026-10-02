@@ -90,7 +90,7 @@ const CATALOG_HTML = `<!doctype html>
   .hd{position:sticky;top:0;z-index:5;background:var(--g);color:var(--gl);padding:12px 16px}
   .hd .t{font-size:17px;font-weight:600}
   .wrap{max-width:900px;margin:0 auto;padding:12px 14px}
-  .search{display:flex;align-items:center;gap:8px;background:var(--card);border:1px solid var(--line);border-radius:12px;padding:0 12px;margin-bottom:12px;position:sticky;top:44px;z-index:4;box-shadow:0 -14px 0 8px var(--bg)}
+  .search{display:flex;align-items:center;gap:8px;background:var(--card);border:1px solid var(--line);border-radius:12px;padding:0 12px;margin-bottom:12px;position:sticky;top:44px;z-index:4}
   .search input{border:0;outline:0;padding:12px 0;font-size:16px;width:100%;background:transparent;font-family:inherit}
   .count{font-size:13px;color:var(--mut);margin-bottom:10px}
   .grid{display:grid;grid-template-columns:repeat(3,1fr);gap:8px}
