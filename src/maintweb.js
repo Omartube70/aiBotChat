@@ -68,10 +68,26 @@ async function loadStaff(env) {
 async function saveStaff(env, d) {
   await env.MEMORY.put('maint:staff', JSON.stringify(d));
 }
+/** أيام الشغل بين تاريخين (شاملة)، الجمعة إجازة مش محسوبة. */
+function workDays(startIso, endIso) {
+  if (!startIso) return 0;
+  const s = new Date(String(startIso).slice(0, 10) + 'T12:00:00Z');
+  const e = new Date(String(endIso || new Date().toISOString()).slice(0, 10) + 'T12:00:00Z');
+  if (isNaN(s) || isNaN(e) || e < s) return 0;
+  let n = 0, i = 0;
+  for (const d = new Date(s); d <= e && i < 800; d.setUTCDate(d.getUTCDate() + 1), i++) {
+    if (d.getUTCDay() !== 5) n++; // 5 = الجمعة
+  }
+  return n;
+}
+function empPeriodStart(e) { return e.periodStart || e.lastPaidAt || e.createdAt || null; }
 function empNet(e) {
   const sal = Number(e.salary) || 0;
+  const daily = sal / 24;
+  const wd = workDays(empPeriodStart(e), cairoNow().iso);
+  const gross = wd * daily;
   return Math.round(
-    sal - (Number(e.absDays) || 0) * (sal / 24) - (Number(e.advAmount) || 0) - (Number(e.dedAmount) || 0) + (Number(e.bonAmount) || 0),
+    gross - (Number(e.absDays) || 0) * daily - (Number(e.advAmount) || 0) - (Number(e.dedAmount) || 0) + (Number(e.bonAmount) || 0),
   );
 }
 /** تكلفة منتج من كتالوج إنياد بالاسم (أقرب تطابق) — للـ "السعر الأساسي" في قطع الغيار. */
@@ -430,8 +446,12 @@ export async function handleMaintWeb(request, url, env) {
     const sd = await loadStaff(env);
     const e = sd.emps.find((x) => x.id === url.searchParams.get('id'));
     if (!e) return json({ ok: false, error: 'مش موجود' }, 404);
-    const out = { id: e.id, name: e.name, advAmount: Number(e.advAmount) || 0, absDays: Number(e.absDays) || 0, dedAmount: Number(e.dedAmount) || 0, bonAmount: Number(e.bonAmount) || 0, events: e.events || [], history: e.history || [], lastPaidAt: e.lastPaidAt || null };
-    if (isManager) { out.salary = Number(e.salary) || 0; out.net = empNet(e); out.dayVal = Math.round((Number(e.salary) || 0) / 24); }
+    const out = { id: e.id, name: e.name, advAmount: Number(e.advAmount) || 0, absDays: Number(e.absDays) || 0, dedAmount: Number(e.dedAmount) || 0, bonAmount: Number(e.bonAmount) || 0, events: e.events || [], history: e.history || [], lastPaidAt: e.lastPaidAt || null, periodStart: empPeriodStart(e) };
+    if (isManager) {
+      const wd = workDays(empPeriodStart(e), cairoNow().iso);
+      out.salary = Number(e.salary) || 0; out.net = empNet(e); out.dayVal = Math.round((Number(e.salary) || 0) / 24);
+      out.workDays = wd; out.gross = Math.round(wd * ((Number(e.salary) || 0) / 24));
+    }
     return json({ ok: true, isManager, canWrite, emp: out });
   }
   if (pathname === '/maint/api/staff/add' && method === 'POST') {
@@ -440,7 +460,7 @@ export async function handleMaintWeb(request, url, env) {
     const name = String(b.name || '').trim();
     if (!name) return json({ ok: false, error: 'اكتب اسم الموظف' }, 400);
     const sd = await loadStaff(env);
-    sd.emps.push({ id: `e${++sd.seq}`, name, salary: Number(b.salary) || 0, advAmount: 0, absDays: 0, events: [], history: [], createdAt: now.iso, updatedAt: now.iso });
+    sd.emps.push({ id: `e${++sd.seq}`, name, salary: Number(b.salary) || 0, advAmount: 0, absDays: 0, dedAmount: 0, bonAmount: 0, events: [], history: [], periodStart: now.iso, createdAt: now.iso, updatedAt: now.iso });
     await saveStaff(env, sd);
     return json({ ok: true });
   }
@@ -481,7 +501,19 @@ export async function handleMaintWeb(request, url, env) {
     e.history.push({ paidAt: now.iso, salary: Number(e.salary) || 0, advAmount: Number(e.advAmount) || 0, absDays: Number(e.absDays) || 0, dedAmount: Number(e.dedAmount) || 0, bonAmount: Number(e.bonAmount) || 0, net: empNet(e) });
     e.events = e.events || [];
     e.events.push({ type: 'paid', amount: empNet(e), text: 'تم القبض', by: role, at: now.iso });
-    e.advAmount = 0; e.absDays = 0; e.dedAmount = 0; e.bonAmount = 0; e.lastPaidAt = now.iso; e.updatedAt = now.iso;
+    e.advAmount = 0; e.absDays = 0; e.dedAmount = 0; e.bonAmount = 0; e.lastPaidAt = now.iso; e.periodStart = now.iso; e.updatedAt = now.iso;
+    await saveStaff(env, sd);
+    return json({ ok: true });
+  }
+  if (pathname === '/maint/api/staff/period' && method === 'POST') {
+    if (!isManager) return needMgr();
+    const b = await request.json().catch(() => ({}));
+    const sd = await loadStaff(env);
+    const e = sd.emps.find((x) => x.id === b.id);
+    if (!e) return json({ ok: false, error: 'مش موجود' }, 404);
+    const dt = String(b.date || '').slice(0, 10);
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(dt)) return json({ ok: false, error: 'تاريخ غير صحيح' }, 400);
+    e.periodStart = dt + 'T00:00:00.000Z'; e.updatedAt = now.iso;
     await saveStaff(env, sd);
     return json({ ok: true });
   }
@@ -975,12 +1007,14 @@ function openEmp(id){
     if(!d.ok)return;var e=d.emp;
     var h='<header><div class="t">'+esc(e.name)+'</div><span class="badge" id="backStaff" style="cursor:pointer">‹ رجوع</span></header><div class="pad">';
     if(d.isManager){
-      h+='<div class="cards"><div class="c"><div class="l">الراتب</div><div class="v">'+money(e.salary)+'</div></div><div class="c"><div class="l">اليوم (÷24)</div><div class="v">'+money(e.dayVal)+'</div></div></div>';
+      h+='<div class="cards"><div class="c"><div class="l">الراتب</div><div class="v">'+money(e.salary)+'</div></div><div class="c"><div class="l">اليومية (÷24)</div><div class="v">'+money(e.dayVal)+'</div></div></div>';
+      h+='<div class="cards"><div class="c"><div class="l">أيام الشغل (من البداية، الجمعة إجازة)</div><div class="v">'+(e.workDays||0)+' يوم</div></div><div class="c"><div class="l">إجمالي الفترة</div><div class="v">'+money(e.gross)+'</div></div></div>';
+      h+='<div class="muted" style="margin-bottom:8px">بداية الفترة: '+(e.periodStart?dlabel(e.periodStart):'—')+'</div>';
       h+='<div class="c" style="background:var(--gl);margin-bottom:12px"><div class="l">صافي القبض لحد دلوقتي</div><div class="v green">'+money(e.net)+' ج</div></div>';
     }
     h+='<div class="cards"><div class="c"><div class="l">سلف الفترة</div><div class="v redc">'+money(e.advAmount)+'</div></div><div class="c"><div class="l">غياب الفترة</div><div class="v redc">'+(e.absDays||0)+' يوم</div></div>';
     h+='<div class="c"><div class="l">خصومات</div><div class="v redc">'+money(e.dedAmount)+'</div></div><div class="c"><div class="l">إضافي</div><div class="v green">'+money(e.bonAmount)+'</div></div></div>';
-    if(d.canWrite)h+='<div class="actions"><button class="btn sm" data-a="adv">+ سلفة</button><button class="btn sm o" data-a="abs">+ غياب</button><button class="btn sm o" data-a="ded">+ خصم</button><button class="btn sm o" data-a="bon">+ إضافي</button>'+(d.isManager?'<button class="btn sm o" data-a="sal">تعديل الراتب</button><button class="btn sm" data-a="paid" style="background:var(--g)">✅ تم القبض</button><button class="btn sm o" data-a="del">حذف</button>':'')+'</div>';
+    if(d.canWrite)h+='<div class="actions"><button class="btn sm" data-a="adv">+ سلفة</button><button class="btn sm o" data-a="abs">+ غياب</button><button class="btn sm o" data-a="ded">+ خصم</button><button class="btn sm o" data-a="bon">+ إضافي</button>'+(d.isManager?'<button class="btn sm o" data-a="start">🟢 بداية عمل</button><button class="btn sm o" data-a="sal">تعديل الراتب</button><button class="btn sm" data-a="paid" style="background:var(--g)">✅ تم القبض</button><button class="btn sm o" data-a="del">حذف</button>':'')+'</div>';
     h+='<div class="sec">الحركة (الأحدث أولاً)</div>';
     var evs=(e.events||[]).slice().reverse();
     h+=evs.length?evs.map(function(x){var lbl=x.type==="advance"?("💵 سلفة "+money(x.amount)+" ج"):x.type==="absence"?("🚫 غياب "+(x.days||0)+" يوم"):x.type==="deduction"?("➖ خصم "+money(x.amount)+" ج"):x.type==="bonus"?("➕ إضافي "+money(x.amount)+" ج"):x.type==="paid"?("✅ تم القبض"+(d.isManager?(" ("+money(x.amount)+" ج)"):"")):"📝";return '<div class="ev">'+lbl+' · '+dlabel(x.at)+(x.text?' — '+esc(x.text):'')+'</div>';}).join(''):'<div class="muted">لسه مفيش</div>';
@@ -997,7 +1031,8 @@ function empAction(a,e){
   else if(a==='ded'){var dd=prompt('قيمة الخصم (جنيه):','');if(dd==null)return;var n3=prompt('سبب الخصم (اختياري):','')||'';staffPost('deduction',{id:e.id,amount:Number(dd)||0,note:n3},e.id);}
   else if(a==='bon'){var bb=prompt('قيمة الإضافي (جنيه):','');if(bb==null)return;var n4=prompt('سبب الإضافي (اختياري):','')||'';staffPost('bonus',{id:e.id,amount:Number(bb)||0,note:n4},e.id);}
   else if(a==='sal'){var s=prompt('الراتب الجديد:',e.salary||'');if(s==null)return;staffPost('salary',{id:e.id,salary:Number(s)||0},e.id);}
-  else if(a==='paid'){if(!confirm('تأكيد: تم قبض '+e.name+'؟ هنبدأ فترة جديدة (السلف والغياب يتصفّروا).'))return;staffPost('paid',{id:e.id},e.id);}
+  else if(a==='start'){var t=new Date(Date.now()+2*3600000).toISOString().slice(0,10);var ds=prompt('بداية العمل (التاريخ) — سيبها زي ما هي للنهارده:',t);if(ds==null)return;staffPost('period',{id:e.id,date:ds},e.id);}
+  else if(a==='paid'){if(!confirm('تأكيد: تم قبض '+e.name+'؟ هنبدأ فترة جديدة (السلف والغياب يتصفّروا والعد يبدأ من النهارده).'))return;staffPost('paid',{id:e.id},e.id);}
   else if(a==='del'){if(!confirm('حذف '+e.name+' نهائيًا؟'))return;staffPost('remove',{id:e.id},null);}
 }
 function staffPost(path,body,reopenId){
