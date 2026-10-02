@@ -75,6 +75,7 @@ export const config = {
     handoffTtl: 7200, // ثواني — بعدها البوت يرجع تلقائيًا لو الموظف نسي يقفل
     admins: ['201000363323', '201003044660', '201050699420'], // AGENT_ADMINS — أسعار البيع والشراء والمخزون (أرقام الموظفين التلاتة)
     payroll: ['201000363323'], // AGENT_PAYROLL — الرواتب من الرقم ده بس
+    maintViewers: ['201000278824'], // MAINT_VIEWERS — صلاحية مشاهدة الصيانة بس (يسأل ولا يعدّل)
   },
 
   // ربط جهات اتصال جوجل من المتصفح (/google/connect) — الحساب الوحيد المسموح بربطه
@@ -158,6 +159,14 @@ export function applyEnv(env = {}) {
     .split(',')
     .map((s) => s.replace(/D/g, ''))
     .filter(Boolean);
+  config.agent.maintViewers = [
+    ...new Set(
+      g('MAINT_VIEWERS', config.agent.maintViewers.join(','))
+        .split(',')
+        .map((s) => s.replace(/\D/g, ''))
+        .filter(Boolean),
+    ),
+  ];
   const httl = Number(g('HANDOFF_TTL_SECONDS', String(config.agent.handoffTtl)));
   config.agent.handoffTtl = Number.isFinite(httl) && httl > 0 ? httl : 7200;
 

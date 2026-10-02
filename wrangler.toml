@@ -41,6 +41,10 @@ AGENT_ADMINS = "201000363323,201003044660,201050699420"
 AGENT_PAYROLL = "201000363323"
 CC_NUMBERS = "201000363323,201003044660,201050699420"
 HANDOFF_TTL_SECONDS = "7200"
+# سيستم الصيانة (/maint): كود الإدارة (كتابة) وكود المشاهدة (قراءة بس) + رقم/أرقام المشاهدة على واتساب
+MAINT_ADMIN_CODE = "2411"
+MAINT_VIEW_CODE = "1012"
+MAINT_VIEWERS = "201000278824"
 # للتجربة بدون واتساب عبر /debug/chat و /debug/search. شيله (أو خليه "0") بعد ما تخلص.
 ENABLE_DEBUG_CHAT = "1"
 # ربط جهات اتصال جوجل (toppower4444@gmail.com) — الـ Client ID مش سرّي؛ الـ GOOGLE_CLIENT_SECRET بيتحط كـ secret في Cloudflare

@@ -322,6 +322,32 @@ export async function uploadMedia(buffer, mimeType = 'audio/ogg', filename = 're
   return j.id || null;
 }
 
+/** إرسال صورة بـ media id مرفوع (للصور المخزّنة زي صور الصيانة). */
+export async function sendImageId(to, mediaId, caption) {
+  if (dbg(to, { sendImageId: true })) return 'dbg';
+  if (!W.token || !W.phoneNumberId || !mediaId) return false;
+  const res = await fetch(graphUrl(`${W.phoneNumberId}/messages`), {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${W.token}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      messaging_product: 'whatsapp',
+      recipient_type: 'individual',
+      to,
+      type: 'image',
+      image: { id: mediaId, caption: caption ? String(caption).slice(0, 1024) : undefined },
+    }),
+  });
+  if (!res.ok) {
+    const t = await res.text().catch(() => '');
+    logErr(`[whatsapp] فشل إرسال الصورة بالـ id ${res.status}: ${t.slice(0, 300)}`);
+    return false;
+  }
+  return true;
+}
+
 /** إرسال رسالة صوتية بـ media id مرفوع. */
 export async function sendAudio(to, mediaId) {
   if (dbg(to, { sendAudio: true })) return 'dbg';

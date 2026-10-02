@@ -66,6 +66,15 @@ import {
 import { catalogStats, searchProducts, stockSummary, setCatalogKV, refreshCatalogWithChanges } from './catalog.js';
 import { synthesize } from './tts.js';
 import { computeInvoice, buildInvoiceXlsx } from './invoice.js';
+import {
+  handleMaintenanceStaff,
+  maintAddStep,
+  handleMaintenancePhoto,
+  isMaintenanceSheet,
+  importMaintenanceSheet,
+  remindMaintenanceUnpaid,
+} from './maintenance.js';
+import { handleMaintWeb } from './maintweb.js';
 import { syncGoogleContacts, getContactInfo, startConnect, finishConnect } from './contacts.js';
 import { noteError, noteFailedStatuses, flushDiag, diagPage, maskPhone } from './diag.js';
 import { sendMessengerText, parseMessengerIncoming } from './messenger.js';
@@ -132,6 +141,12 @@ export default {
     }
     if (method === 'GET' && (pathname === '/oauth/callback' || pathname === '/google/callback')) {
       return finishConnect(url, env);
+    }
+
+    // سيستم الصيانة (ويب) — نفس داتا البوت
+    if (pathname === '/maint' || pathname.startsWith('/maint/')) {
+      const r = await handleMaintWeb(request, url, env);
+      if (r) return r;
     }
 
     if (method === 'GET' && pathname === '/health') {
@@ -447,6 +462,7 @@ export default {
     );
     ctx.waitUntil(remindStaffWindow(env).catch((err) => console.error('[remind] خطأ:', err.message)));
     ctx.waitUntil(remindSalesFile(env).catch((err) => console.error('[sales-remind] خطأ:', err.message)));
+    ctx.waitUntil(remindMaintenanceUnpaid(env).catch((err) => console.error('[maint-remind] خطأ:', err.message)));
     // نسخة الكتالوج المحفوظة بتتحدث هنا — الرسايل مش بتنادي إنياد خالص
     ctx.waitUntil(
       refreshCatalogWithChanges()
@@ -697,7 +713,37 @@ async function handleMessage(msg, env) {
       await sendText(from, reply);
       return;
     }
+    // صورة من موظف → صورة صيانة لعمارة (حسب الكابشن أو العملية اللي بيكتبها بعدها)
+    if (type === 'image' && msg.image?.id) {
+      await handleMaintenancePhoto(from, msg.image, text, env);
+      return;
+    }
     await handleAgentMessage(from, text, env, msg.contextId);
+    return;
+  }
+
+  // رقم مشاهدة الصيانة: يسأل عن أي حاجة في الشيت (مين ما دفعش، مشاكل، رئيس الاتحاد...) بس ما يعدّلش
+  if (config.agent.maintViewers?.includes(from)) {
+    let vtext = text;
+    if (type === 'audio' && msg.audio?.id) {
+      try {
+        const media = await fetchMedia(msg.audio.id);
+        if (media && media.size <= MAX_AUDIO_BYTES) vtext = await transcribeAudio(media.buffer, media.mimeType || msg.audio.mimeType);
+      } catch (err) {
+        noteError(`[maint-viewer voice] ${err.message}`);
+      }
+    }
+    if (type === 'image') {
+      await sendText(from, 'حضرتك صلاحيتك مشاهدة بس 🙏 تقدر تسأل عن أي عملية بالاسم أو الرقم.');
+      return;
+    }
+    if (!vtext) {
+      await sendText(from, 'أهلاً بحضرتك 👋 اسأل عن أي عملية: "مين ما دفعش شهر 9"، أو اكتب رقم العملية (زي 30ج)، أو "المناطق"، أو "شيت الصيانة".');
+      return;
+    }
+    const handled = await handleMaintenanceStaff(from, vtext.trim(), env, false);
+    if (!handled)
+      await sendText(from, 'تقدر تسأل: "مين ما دفعش شهر 9"، أو اكتب رقم عملية (زي 30ج)، أو "المناطق"، أو "شيت الصيانة".');
     return;
   }
 
@@ -1220,6 +1266,9 @@ async function handleAgentMessage(agent, text, env, contextId) {
   // "الحاج معاك" → مساعد حر لأي طلب لحد ما يقول "رجوع للشغل"
   if (await handleFreeMode(agent, t, env, contextId)) return;
 
+  // خطوة في "صيانة جديدة" (الإجابات ممكن تبقى أرقام زي 250 — لازم قبل أوامر العروض)
+  if (await maintAddStep(agent, t, env)) return;
+
   // رد على "أبعت؟" من أمر بالكلام العادي (قول لعمر ... / حط سعر عرض فلان ...)
   if (await handleStaffPick(agent, t, env)) return;
 
@@ -1428,6 +1477,8 @@ async function handleAgentMessage(agent, text, env, contextId) {
     }
   }
   if (!target) {
+    // أوامر الصيانة (تحصيل/مشاكل/مقايسات/صور/شيت) — قبل المساعد العام
+    if (await handleMaintenanceStaff(agent, t, env)) return;
     // أي كلام تاني → نفهم الموظف عايز إيه (سعر، فاتورة، عرض، رواتب، رسالة لزبون...) وننفّذ
     await handleStaffRequest(agent, t, env);
     return;
@@ -2113,6 +2164,16 @@ async function handleInventoryUpload(agent, doc, env) {
 /** ملف إنياد (أي نوع من الأربعة) → نتعرّف عليه ونحفظه ونرد بملخص. */
 async function handleShopFile(agent, buffer, env) {
   const rows = readSheet(buffer);
+  // شيت تحصيل الصيانة (رقم العملية + المدفوع + شهر 1..12)
+  if (isMaintenanceSheet(rows)) {
+    const { count, added, updated } = await importMaintenanceSheet(env, rows);
+    await sendText(
+      agent,
+      `✅ اتحدّث شيت الصيانة: ${count} عملية (${added} جديدة، ${updated} اتحدّثت).\n\n` +
+        'اسألني: "مين ما دفعش شهر 9"، أو اكتب رقم عملية (زي 30ج) تشوف ملفها، أو "المناطق"، أو "شيت الصيانة".',
+    );
+    return;
+  }
   const kind = detectKind(rows);
   if (kind === 'sales') {
     const data = parseSales(rows);
