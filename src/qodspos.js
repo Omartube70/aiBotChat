@@ -232,11 +232,11 @@ const POS_HTML = `<!doctype html>
  .wrap{max-width:720px;margin:0 auto;min-height:100vh}
  header{position:sticky;top:0;z-index:10;background:var(--g);color:var(--gl);padding:11px 14px;display:flex;align-items:center;justify-content:space-between}
  header .t{font-size:16px;font-weight:600}
- .tabs{display:flex;background:var(--gd)}
+ .tabs{display:flex;background:var(--gd);position:sticky;top:44px;z-index:9}
  .tabs button{flex:1;background:transparent;border:0;color:#bfe6d8;padding:11px 4px;font-size:14px;font-family:inherit;cursor:pointer}
  .tabs button.on{color:#fff;border-bottom:3px solid #fff;font-weight:600}
  .pad{padding:12px 14px}
- .search{display:flex;align-items:center;gap:8px;background:var(--card);border:1px solid var(--line);border-radius:10px;padding:0 12px;margin-bottom:10px}
+ .search{display:flex;align-items:center;gap:8px;background:var(--card);border:1px solid var(--line);border-radius:10px;padding:0 12px;margin-bottom:10px;position:sticky;top:88px;z-index:8;box-shadow:0 -10px 0 6px var(--bg)}
  .search input{border:0;outline:0;padding:11px 0;font-size:15px;width:100%;background:transparent;font-family:inherit}
  .grid{display:grid;grid-template-columns:repeat(3,1fr);gap:8px}
  @media(min-width:560px){.grid{grid-template-columns:repeat(auto-fill,minmax(130px,1fr))}}

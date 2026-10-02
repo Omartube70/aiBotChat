@@ -618,7 +618,7 @@ const APP_HTML = `<!doctype html>
   .c .l{font-size:12px;color:var(--mut)}
   .c .v{font-size:21px;font-weight:600;margin-top:2px}
   .green{color:var(--g)} .redc{color:var(--red)}
-  .search{display:flex;align-items:center;gap:8px;background:var(--card);border:1px solid var(--line);border-radius:10px;padding:0 12px;margin-bottom:12px}
+  .search{display:flex;align-items:center;gap:8px;background:var(--card);border:1px solid var(--line);border-radius:10px;padding:0 12px;margin-bottom:12px;position:sticky;top:50px;z-index:4;box-shadow:0 -14px 0 8px var(--bg)}
   .search input{border:0;outline:0;padding:11px 0;font-size:15px;width:100%;background:transparent;font-family:inherit}
   .chips{display:flex;gap:6px;overflow-x:auto;padding-bottom:6px;margin-bottom:12px}
   .chip{white-space:nowrap;font-size:14px;background:var(--card);border:1px solid var(--line);color:var(--mut);padding:6px 14px;border-radius:20px;cursor:pointer}
