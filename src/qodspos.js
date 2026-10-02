@@ -84,7 +84,7 @@ export async function handleQodsPos(request, url, env) {
 
   if (pathname === '/pos/api/login' && method === 'POST') {
     const b = await request.json().catch(() => ({}));
-    const code = String(b.code || '').trim();
+    const code = String(b.code || '').trim().replace(/[٠-٩]/g, (d) => '٠١٢٣٤٥٦٧٨٩'.indexOf(d)).replace(/[۰-۹]/g, (d) => '۰۱۲۳۴۵۶۷۸۹'.indexOf(d));
     const cc = await codes(env);
     const role = roleForCode(cc, code);
     if (!role) return json({ ok: false, error: 'الكود غلط' }, 401);

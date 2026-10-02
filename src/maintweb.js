@@ -124,6 +124,11 @@ function b64ToBytes(b64) {
 function findById(data, id) {
   return data.buildings.find((b) => b.id === id || b.key === id);
 }
+function latinDigits(s) {
+  return String(s == null ? '' : s)
+    .replace(/[٠-٩]/g, (d) => '٠١٢٣٤٥٦٧٨٩'.indexOf(d))
+    .replace(/[۰-۹]/g, (d) => '۰۱۲۳۴۵۶۷۸۹'.indexOf(d));
+}
 function monthStatus(b, m, year) {
   return monthsOf(b, year || yearNow())[m] != null;
 }
@@ -159,7 +164,7 @@ export async function handleMaintWeb(request, url, env) {
   // تسجيل الدخول
   if (pathname === '/maint/api/login' && method === 'POST') {
     const body = await request.json().catch(() => ({}));
-    const code = String(body.code || '').trim();
+    const code = latinDigits(String(body.code || '').trim());
     const cc = await maintCodes(env);
     const role = roleForCode(cc, code);
     if (!role) return json({ ok: false, error: 'الكود غلط' }, 401);
@@ -518,7 +523,7 @@ export async function handleMaintWeb(request, url, env) {
 }
 
 /* ================= Service Worker + Manifest ================= */
-const SW_JS = `const C='maint-v3';
+const SW_JS = `const C='maint-v4';
 self.addEventListener('install',function(e){self.skipWaiting();e.waitUntil(caches.open(C).then(function(c){return c.add('/maint');}));});
 self.addEventListener('activate',function(e){e.waitUntil((async function(){var ks=await caches.keys();await Promise.all(ks.filter(function(k){return k!==C;}).map(function(k){return caches.delete(k);}));await self.clients.claim();})());});
 self.addEventListener('fetch',function(e){
@@ -1004,6 +1009,10 @@ function openSettings(){
   fetch('/maint/api/settings',{headers:{Authorization:'Bearer '+T}}).then(function(r){return r.json();}).then(function(d){
     if(!d.ok){alert(d.error||'للمدير بس');return;}
     var h='<header><div class="t">⚙️ الإعدادات</div><span class="badge" id="closeB" style="cursor:pointer">✕</span></header><div class="pad">';
+    var o=location.origin;
+    h+='<div class="sec">اللينكات (انسخ وابعت أو حطها على الموبايل)</div>';
+    h+='<div class="ev">🔧 لينك برنامج الصيانة <a data-cp="'+o+'/maint" style="cursor:pointer;color:var(--g)">نسخ</a></div>';
+    h+='<div class="ev">🏗️ لينك صفحة توب باور (للزباين) <a data-cp="'+o+'/tp" style="cursor:pointer;color:var(--g)">نسخ</a></div>';
     h+='<div class="sec">الأكواد الأساسية</div>';
     h+='<div class="ev">👑 كود المدير (ليك إنت — بيشوف الرواتب والأرباح): <b>'+esc(d.manager)+'</b> <a data-ec="manager" style="cursor:pointer">تغيير</a></div>';
     h+='<div class="ev">✏️ كود التعديل (الإدارة): <b>'+esc(d.admin)+'</b> <a data-ec="admin" style="cursor:pointer">تغيير</a></div>';
@@ -1022,8 +1031,9 @@ function openSettings(){
       fetch('/maint/api/settings/extra',{method:'POST',headers:{'Content-Type':'application/json',Authorization:'Bearer '+T},body:JSON.stringify({name:name,code:code,role:r})}).then(function(x){return x.json();}).then(function(x){if(x.ok)openSettings();else alert(x.error||'مشكلة');});
     });
     el('sheet').addEventListener('click',function(ev){
-      var ec=ev.target.closest('[data-ec]'),rm=ev.target.closest('[data-rm]');
-      if(ec){var w=ec.getAttribute('data-ec');var v=prompt('الكود الجديد:','');if(!v)return;fetch('/maint/api/settings/code',{method:'POST',headers:{'Content-Type':'application/json',Authorization:'Bearer '+T},body:JSON.stringify({which:w,value:v})}).then(function(x){return x.json();}).then(function(x){if(x.ok)openSettings();else alert(x.error||'مشكلة');});}
+      var ec=ev.target.closest('[data-ec]'),rm=ev.target.closest('[data-rm]'),cp=ev.target.closest('[data-cp]');
+      if(cp){var L=cp.getAttribute('data-cp');if(navigator.clipboard&&navigator.clipboard.writeText){navigator.clipboard.writeText(L).then(function(){cp.textContent='اتنسخ ✅';},function(){cp.textContent=L;});}else{cp.textContent=L;}}
+      else if(ec){var w=ec.getAttribute('data-ec');var v=prompt('الكود الجديد:','');if(!v)return;fetch('/maint/api/settings/code',{method:'POST',headers:{'Content-Type':'application/json',Authorization:'Bearer '+T},body:JSON.stringify({which:w,value:v})}).then(function(x){return x.json();}).then(function(x){if(x.ok)openSettings();else alert(x.error||'مشكلة');});}
       else if(rm){if(!confirm('حذف الكود؟'))return;fetch('/maint/api/settings/extra-remove',{method:'POST',headers:{'Content-Type':'application/json',Authorization:'Bearer '+T},body:JSON.stringify({code:rm.getAttribute('data-rm')})}).then(function(x){return x.json();}).then(function(x){if(x.ok)openSettings();});}
     });
   }).catch(function(){alert('الإعدادات محتاجة نت.');});
