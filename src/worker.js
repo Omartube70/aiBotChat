@@ -76,6 +76,7 @@ import {
 } from './maintenance.js';
 import { handleMaintWeb } from './maintweb.js';
 import { handleQodsWeb } from './qods.js';
+import { handleTopPowerWeb } from './toppower.js';
 import { syncGoogleContacts, getContactInfo, startConnect, finishConnect } from './contacts.js';
 import { noteError, noteFailedStatuses, flushDiag, diagPage, maskPhone } from './diag.js';
 import { sendMessengerText, parseMessengerIncoming } from './messenger.js';
@@ -152,6 +153,11 @@ export default {
     // القدس — كتالوج المنتجات العام
     if (pathname === '/qods' || pathname.startsWith('/qods/')) {
       const r = await handleQodsWeb(request, url, env);
+      if (r) return r;
+    }
+    // توب باور — صفحة عامة (تركيب وصيانة)
+    if (['/tp', '/toppower'].includes(pathname) || pathname.startsWith('/tp/') || pathname.startsWith('/toppower/')) {
+      const r = handleTopPowerWeb(request, url);
       if (r) return r;
     }
 
