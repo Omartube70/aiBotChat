@@ -42,10 +42,23 @@ function viewCode(env) {
 function mgrCode(env) {
   return env.MAINT_MANAGER_CODE || '0000';
 }
-/** الأكواد الحيّة: من KV لو المدير غيّرها، وإلا من البيئة. */
+/** الأكواد الحيّة: من KV لو المدير غيّرها، وإلا من البيئة. extra = أكواد موظفين إضافية بصلاحيات. */
 async function maintCodes(env) {
   const c = (await env.MEMORY.get('maint:codes', 'json')) || {};
-  return { admin: c.admin || adminCode(env), view: c.view || viewCode(env), manager: c.manager || mgrCode(env) };
+  return {
+    admin: c.admin || adminCode(env), view: c.view || viewCode(env), manager: c.manager || mgrCode(env),
+    extra: Array.isArray(c.extra) ? c.extra : [],
+  };
+}
+/** يحدّد الدور من الكود (الأساسية + الإضافية). */
+function roleForCode(cc, code) {
+  if (!code) return null;
+  if (code === cc.manager) return 'manager';
+  if (code === cc.admin) return 'admin';
+  if (code === cc.view) return 'view';
+  const ex = (cc.extra || []).find((e) => String(e.code) === String(code));
+  if (ex) return ['manager', 'admin', 'view'].includes(ex.role) ? ex.role : 'view';
+  return null;
 }
 async function loadStaff(env) {
   const d = (await env.MEMORY.get('maint:staff', 'json')) || { seq: 0, emps: [] };

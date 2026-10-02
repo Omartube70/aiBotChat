@@ -75,6 +75,7 @@ import {
   remindMaintenanceUnpaid,
 } from './maintenance.js';
 import { handleMaintWeb } from './maintweb.js';
+import { handleQodsWeb } from './qods.js';
 import { syncGoogleContacts, getContactInfo, startConnect, finishConnect } from './contacts.js';
 import { noteError, noteFailedStatuses, flushDiag, diagPage, maskPhone } from './diag.js';
 import { sendMessengerText, parseMessengerIncoming } from './messenger.js';
@@ -146,6 +147,11 @@ export default {
     // سيستم الصيانة (ويب) — نفس داتا البوت
     if (pathname === '/maint' || pathname.startsWith('/maint/')) {
       const r = await handleMaintWeb(request, url, env);
+      if (r) return r;
+    }
+    // القدس — كتالوج المنتجات العام
+    if (pathname === '/qods' || pathname.startsWith('/qods/')) {
+      const r = await handleQodsWeb(request, url, env);
       if (r) return r;
     }
 
