@@ -7,6 +7,7 @@
  *   GET /qods/api/products    قائمة المنتجات (اسم، سعر البيع، صورة، فئة) — من غير تكلفة
  */
 import { QODS_ICON_B64 } from './qodsicon.js';
+import { COVER_B64 } from './qodscover.js';
 
 const SNAP_KEY = 'catalog:snapshot';
 
@@ -31,6 +32,9 @@ export async function handleQodsWeb(request, url, env) {
   }
   if (pathname === '/qods/icon-512.png') {
     return new Response(b64ToBytes(QODS_ICON_B64), { headers: { 'Content-Type': 'image/png', 'Cache-Control': 'public, max-age=86400' } });
+  }
+  if (pathname === '/qods/cover.jpg') {
+    return new Response(b64ToBytes(COVER_B64), { headers: { 'Content-Type': 'image/jpeg', 'Cache-Control': 'public, max-age=86400' } });
   }
   if (pathname === '/qods/api/products' && request.method === 'GET') {
     const prods = await allProducts(env);
@@ -83,8 +87,8 @@ const CATALOG_HTML = `<!doctype html>
   :root{--g:#0F6E56;--gd:#085041;--gl:#E1F5EE;--bg:#f4f5f3;--card:#fff;--line:#e5e5e0;--mut:#6b6b66;--txt:#1c1c1a}
   *{box-sizing:border-box}
   body{margin:0;font-family:system-ui,-apple-system,"Segoe UI",Tahoma,Arial,sans-serif;background:var(--bg);color:var(--txt)}
-  header{position:sticky;top:0;z-index:5;background:var(--g);color:var(--gl);padding:12px 16px}
-  header .t{font-size:17px;font-weight:600;display:flex;align-items:center;gap:8px}
+  .cover{width:100%;max-width:900px;margin:0 auto;background:#1c1c1a;aspect-ratio:716/1503;overflow:hidden}
+  .cover img{width:100%;height:100%;object-fit:cover;object-position:center 79%;display:block}
   .wrap{max-width:900px;margin:0 auto;padding:12px 14px}
   .search{display:flex;align-items:center;gap:8px;background:var(--card);border:1px solid var(--line);border-radius:12px;padding:0 12px;margin-bottom:12px}
   .search input{border:0;outline:0;padding:12px 0;font-size:16px;width:100%;background:transparent;font-family:inherit}
@@ -104,7 +108,7 @@ const CATALOG_HTML = `<!doctype html>
 </style>
 </head>
 <body>
-<header><div class="t">🛗 القدس لمهمات المصاعد</div></header>
+<div class="cover"><img src="/qods/cover.jpg" alt="القدس لمهمات المصاعد"></div>
 <div class="wrap">
   <div class="search">🔎<input id="q" placeholder="دوّر على منتج بالاسم..." autocomplete="off"></div>
   <div class="count" id="count">بيحمّل المنتجات...</div>

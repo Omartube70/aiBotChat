@@ -322,12 +322,14 @@ function showInvoice(s){
   h+='<div class="muted" style="text-align:center;margin-top:8px">📞 01050699418</div>';
   var pw=(Number(localStorage.getItem('pos_pw'))||576)===384?'58مم':'80مم';
   var cp=Number(localStorage.getItem('pos_copies'))||1;
-  h+='<button class="btn" style="width:100%;margin-top:12px" id="pth">🖨️ طباعة حرارية ('+cp+' نسخة)</button>';
-  h+='<div style="display:flex;gap:8px;margin-top:8px"><button class="btn o sm" id="cpb" style="flex:1">نسخ: '+cp+'</button><button class="btn o sm" id="pwb" style="flex:1">مقاس: '+pw+'</button><button class="btn o sm" id="pnorm" style="flex:1">عادية</button></div>';
+  h+='<button class="btn" style="width:100%;margin-top:12px" id="pth">🖨️ طباعة ('+cp+' نسخة)</button>';
+  h+='<div style="display:flex;gap:8px;margin-top:8px"><button class="btn o sm" id="cpb" style="flex:1">نسخ: '+cp+'</button><button class="btn o sm" id="pwb" style="flex:1">مقاس: '+pw+'</button></div>';
+  h+='<div style="display:flex;gap:8px;margin-top:8px"><button class="btn o sm" id="pusb" style="flex:1">USB مباشر</button><button class="btn o sm" id="pnorm" style="flex:1">عادية (كمبيوتر)</button></div>';
   h+='<button class="btn o" style="width:100%;margin-top:8px" id="ok">تمام</button>';
   el('sheet').innerHTML=h;el('ov').style.display='flex';
   el('ok').onclick=function(){el('ov').style.display='none';if(TAB!=='drawer')sell();};
   el('pth').onclick=function(){printThermal(s);};
+  el('pusb').onclick=function(){printUSB(s);};
   el('pnorm').onclick=function(){window.print();};
   el('pwb').onclick=function(){var cur=Number(localStorage.getItem('pos_pw'))||576;localStorage.setItem('pos_pw',cur===576?384:576);showInvoice(s);};
   el('cpb').onclick=function(){localStorage.setItem('pos_copies',cp===1?2:1);showInvoice(s);};
@@ -383,9 +385,20 @@ async function getPrinter(){
   try{await dev.claimInterface(ifn);}catch(e){}
   window._usbdev=dev;window._usbep=epn;return dev;
 }
-async function printThermal(s){
-  if(!navigator.usb){toast('لازم Chrome على أندرويد للطباعة USB');return;}
-  var btn=el('pth');if(btn){btn.textContent='بيطبع...';}
+function bytesToB64(bytes){var bin='';var CH=0x8000;for(var i=0;i<bytes.length;i+=CH){bin+=String.fromCharCode.apply(null,bytes.subarray(i,i+CH));}return btoa(bin);}
+function escposFor(s,copies,W){var one=canvasToEscpos(drawReceipt(s,W));var init=new Uint8Array([0x1B,0x40]);var total=(init.length+one.length)*copies;var out=new Uint8Array(total);var off=0;for(var c=0;c<copies;c++){out.set(init,off);off+=init.length;out.set(one,off);off+=one.length;}return out;}
+/* الطباعة عبر RawBT (أندرويد) — بنبعت الفاتورة كـ ESC/POS صورة */
+function printThermal(s){
+  var W=Number(localStorage.getItem('pos_pw'))||576;
+  var copies=Number(localStorage.getItem('pos_copies'))||1;
+  try{
+    var b64=bytesToB64(escposFor(s,copies,W));
+    window.location.href='rawbt:base64,'+b64;
+  }catch(e){toast('مشكلة في تجهيز الطباعة: '+(e.message||e));}
+}
+/* طباعة USB مباشرة (احتياطي) */
+async function printUSB(s){
+  if(!navigator.usb){toast('لازم Chrome على أندرويد');return;}
   try{
     var W=Number(localStorage.getItem('pos_pw'))||576;
     var copies=Number(localStorage.getItem('pos_copies'))||1;
@@ -395,8 +408,8 @@ async function printThermal(s){
       await dev.transferOut(window._usbep,new Uint8Array([0x1B,0x40]));
       for(var i=0;i<bytes.length;i+=8192){await dev.transferOut(window._usbep,bytes.slice(i,i+8192));}
     }
-    if(btn)btn.textContent='اتطبعت ✅';
-  }catch(e){window._usbdev=null;toast('مشكلة الطباعة: '+(e.message||e));if(btn)btn.textContent='🖨️ طباعة حرارية (USB)';}
+    toast('اتطبعت ✅');
+  }catch(e){window._usbdev=null;toast('مشكلة USB: '+(e.message||e));}
 }
 /* ---- الخزنة ---- */
 function drawer(){
