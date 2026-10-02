@@ -87,8 +87,8 @@ const CATALOG_HTML = `<!doctype html>
   :root{--g:#0F6E56;--gd:#085041;--gl:#E1F5EE;--bg:#f4f5f3;--card:#fff;--line:#e5e5e0;--mut:#6b6b66;--txt:#1c1c1a}
   *{box-sizing:border-box}
   body{margin:0;font-family:system-ui,-apple-system,"Segoe UI",Tahoma,Arial,sans-serif;background:var(--bg);color:var(--txt)}
-  .cover{width:100%;max-width:900px;margin:0 auto;background:#1c1c1a;aspect-ratio:716/1503;overflow:hidden}
-  .cover img{width:100%;height:100%;object-fit:cover;object-position:center 79%;display:block}
+  .hd{position:sticky;top:0;z-index:5;background:var(--g);color:var(--gl);padding:12px 16px}
+  .hd .t{font-size:17px;font-weight:600}
   .wrap{max-width:900px;margin:0 auto;padding:12px 14px}
   .search{display:flex;align-items:center;gap:8px;background:var(--card);border:1px solid var(--line);border-radius:12px;padding:0 12px;margin-bottom:12px}
   .search input{border:0;outline:0;padding:12px 0;font-size:16px;width:100%;background:transparent;font-family:inherit}
@@ -108,7 +108,7 @@ const CATALOG_HTML = `<!doctype html>
 </style>
 </head>
 <body>
-<div class="cover"><img src="/qods/cover.jpg" alt="القدس لمهمات المصاعد"></div>
+<header class="hd"><div class="t">🛗 القدس لمهمات المصاعد</div></header>
 <div class="wrap">
   <div class="search">🔎<input id="q" placeholder="دوّر على منتج بالاسم..." autocomplete="off"></div>
   <div class="count" id="count">بيحمّل المنتجات...</div>
