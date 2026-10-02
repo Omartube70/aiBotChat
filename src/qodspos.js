@@ -48,12 +48,18 @@ async function hmac(secret, msg) {
   return [...new Uint8Array(s)].map((b) => b.toString(16).padStart(2, '0')).join('');
 }
 function secretOf(env) { return env.MAINT_SECRET || env.DEBUG_KEY || 'qods-dev-secret'; }
-async function mkToken(role, env) { const exp = Math.floor(Date.now() / 1000) + TTL; const body = `${role}.${exp}`; return `${body}.${await hmac(secretOf(env), body)}`; }
+async function mkToken(role, name, env) { const exp = Math.floor(Date.now() / 1000) + TTL; const en = encodeURIComponent(name || ''); const body = `${role}.${en}.${exp}`; return `${body}.${await hmac(secretOf(env), body)}`; }
 async function verify(token, env) {
-  if (!token) return null; const p = String(token).split('.'); if (p.length !== 3) return null;
-  const [role, exp, sig] = p; if (!['manager', 'admin', 'view'].includes(role)) return null;
+  if (!token) return null; const p = String(token).split('.'); if (p.length !== 4) return null;
+  const [role, en, exp, sig] = p; if (!['manager', 'admin', 'view'].includes(role)) return null;
   if (Number(exp) < Math.floor(Date.now() / 1000)) return null;
-  return (await hmac(secretOf(env), `${role}.${exp}`)) === sig ? role : null;
+  if ((await hmac(secretOf(env), `${role}.${en}.${exp}`)) !== sig) return null;
+  return { role, name: decodeURIComponent(en) };
+}
+function sellerName(cc, code, role) {
+  const ex = (cc.extra || []).find((e) => String(e.code) === String(code));
+  if (ex) return ex.name;
+  return role === 'manager' ? 'المدير' : role === 'admin' ? 'الإدارة' : 'مشاهدة';
 }
 function bearer(req) { const h = req.headers.get('Authorization') || ''; const m = h.match(/^Bearer\s+(.+)$/i); return m ? m[1] : ''; }
 
@@ -78,12 +84,16 @@ export async function handleQodsPos(request, url, env) {
 
   if (pathname === '/pos/api/login' && method === 'POST') {
     const b = await request.json().catch(() => ({}));
-    const role = roleForCode(await codes(env), String(b.code || '').trim());
+    const code = String(b.code || '').trim();
+    const cc = await codes(env);
+    const role = roleForCode(cc, code);
     if (!role) return json({ ok: false, error: 'الكود غلط' }, 401);
-    return json({ ok: true, role, token: await mkToken(role, env) });
+    const name = sellerName(cc, code, role);
+    return json({ ok: true, role, name, token: await mkToken(role, name, env) });
   }
-  const role = await verify(bearer(request), env);
-  if (!role) return json({ ok: false, error: 'محتاج دخول' }, 401);
+  const auth = await verify(bearer(request), env);
+  if (!auth) return json({ ok: false, error: 'محتاج دخول' }, 401);
+  const role = auth.role, seller = auth.name;
   const isMgr = role === 'manager';
   const canWrite = role === 'manager' || role === 'admin';
   const now = cairoNow();
@@ -100,10 +110,17 @@ export async function handleQodsPos(request, url, env) {
     const total = Math.max(0, subtotal - discount);
     const all = (await env.MEMORY.get(SALES_KEY, 'json')) || [];
     const no = invoiceNo(now, all.length + 1);
-    const sale = { no, items, subtotal, discount, total, customer: String(b.customer || ''), by: role, at: now.iso, date: now.date };
+    const sale = { no, items, subtotal, discount, total, customer: String(b.customer || ''), seller, by: role, at: now.iso, date: now.date };
     all.push(sale);
     await env.MEMORY.put(SALES_KEY, JSON.stringify(all.slice(-5000)));
     return json({ ok: true, sale });
+  }
+
+  if (pathname === '/pos/api/invoice' && method === 'GET') {
+    const no = url.searchParams.get('no') || '';
+    const all = (await env.MEMORY.get(SALES_KEY, 'json')) || [];
+    const s = all.find((x) => String(x.no).toLowerCase() === no.trim().toLowerCase());
+    return json({ ok: true, sale: s || null });
   }
 
   if (pathname === '/pos/api/day' && method === 'GET') {
@@ -259,7 +276,7 @@ function toast(m){var t=document.createElement('div');t.textContent=m;t.style.cs
 function api(p,o){o=o||{};o.headers=o.headers||{};if(T)o.headers.Authorization='Bearer '+T;if(o.body){o.headers['Content-Type']='application/json';o.body=JSON.stringify(o.body);}return fetch('/pos/api/'+p,o).then(function(r){if(r.status===401){logout();throw new Error('x');}return r.json();});}
 function logout(){localStorage.removeItem('pos_token');localStorage.removeItem('pos_role');T='';ROLE='';renderLogin();}
 function renderLogin(){el('app').innerHTML='<div class="center"><div class="login"><div style="font-size:20px;font-weight:700;color:var(--g)">🛗 القدس — المحل</div><div class="muted" style="margin-top:6px">اكتب كود الدخول</div><input id="code" type="tel" inputmode="numeric" placeholder="كود"><div class="err" id="e"></div><button class="btn" style="width:100%" id="lb">دخول</button></div></div>';el('code').focus();el('lb').onclick=doLogin;el('code').addEventListener('keydown',function(e){if(e.key==='Enter')doLogin();});}
-function doLogin(){var code=el('code').value.trim();fetch('/pos/api/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({code:code})}).then(function(r){return r.json();}).then(function(d){if(!d.ok){el('e').textContent=d.error||'غلط';return;}T=d.token;ROLE=d.role;localStorage.setItem('pos_token',T);localStorage.setItem('pos_role',ROLE);home();}).catch(function(){el('e').textContent='مشكلة';});}
+function doLogin(){var code=el('code').value.trim();fetch('/pos/api/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({code:code})}).then(function(r){return r.json();}).then(function(d){if(!d.ok){el('e').textContent=d.error||'غلط';return;}T=d.token;ROLE=d.role;localStorage.setItem('pos_token',T);localStorage.setItem('pos_role',ROLE);localStorage.setItem('pos_name',d.name||'');home();}).catch(function(){el('e').textContent='مشكلة';});}
 function home(){
   el('app').innerHTML='<header><div class="t">🛗 القدس — المحل</div><button class="btn sm o" style="color:#fff;border-color:#fff" id="out">خروج</button></header><div class="tabs" id="tabs"></div><div id="body" class="pad"><div class="empty">بحمّل...</div></div>';
   el('out').onclick=logout;
@@ -301,16 +318,19 @@ function showInvoice(s){
   if(s.discount)h+='<div class="li"><span>خصم</span><span>-'+money(s.discount)+'</span></div>';
   h+='<div class="li"><b>المدفوع</b><b>'+money(s.total)+' ج</b></div>';
   if(s.customer)h+='<div class="muted" style="margin-top:6px">العميل: '+esc(s.customer)+'</div>';
+  if(s.seller)h+='<div class="muted">البايع: '+esc(s.seller)+'</div>';
   h+='<div class="muted" style="text-align:center;margin-top:8px">📞 01050699418</div>';
   var pw=(Number(localStorage.getItem('pos_pw'))||576)===384?'58مم':'80مم';
-  h+='<button class="btn" style="width:100%;margin-top:12px" id="pth">🖨️ طباعة حرارية (USB)</button>';
-  h+='<div style="display:flex;gap:8px;margin-top:8px"><button class="btn o sm" id="pwb" style="flex:1">مقاس: '+pw+'</button><button class="btn o sm" id="pnorm" style="flex:1">طباعة عادية</button></div>';
+  var cp=Number(localStorage.getItem('pos_copies'))||1;
+  h+='<button class="btn" style="width:100%;margin-top:12px" id="pth">🖨️ طباعة حرارية ('+cp+' نسخة)</button>';
+  h+='<div style="display:flex;gap:8px;margin-top:8px"><button class="btn o sm" id="cpb" style="flex:1">نسخ: '+cp+'</button><button class="btn o sm" id="pwb" style="flex:1">مقاس: '+pw+'</button><button class="btn o sm" id="pnorm" style="flex:1">عادية</button></div>';
   h+='<button class="btn o" style="width:100%;margin-top:8px" id="ok">تمام</button>';
   el('sheet').innerHTML=h;el('ov').style.display='flex';
-  el('ok').onclick=function(){el('ov').style.display='none';sell();};
+  el('ok').onclick=function(){el('ov').style.display='none';if(TAB!=='drawer')sell();};
   el('pth').onclick=function(){printThermal(s);};
   el('pnorm').onclick=function(){window.print();};
   el('pwb').onclick=function(){var cur=Number(localStorage.getItem('pos_pw'))||576;localStorage.setItem('pos_pw',cur===576?384:576);showInvoice(s);};
+  el('cpb').onclick=function(){localStorage.setItem('pos_copies',cp===1?2:1);showInvoice(s);};
 }
 /* ---- طباعة حرارية USB (أندرويد Chrome) — الفاتورة كصورة عشان العربي يطلع صح ---- */
 function fmtDate(iso){try{var d=new Date(iso);function p(n){return (n<10?'0':'')+n;}return p(d.getDate())+'/'+p(d.getMonth()+1)+'/'+d.getFullYear()+' '+p(d.getHours())+':'+p(d.getMinutes());}catch(e){return '';}}
@@ -368,22 +388,28 @@ async function printThermal(s){
   var btn=el('pth');if(btn){btn.textContent='بيطبع...';}
   try{
     var W=Number(localStorage.getItem('pos_pw'))||576;
+    var copies=Number(localStorage.getItem('pos_copies'))||1;
     var bytes=canvasToEscpos(drawReceipt(s,W));
     var dev=await getPrinter();
-    await dev.transferOut(window._usbep,new Uint8Array([0x1B,0x40]));
-    for(var i=0;i<bytes.length;i+=8192){await dev.transferOut(window._usbep,bytes.slice(i,i+8192));}
+    for(var c=0;c<copies;c++){
+      await dev.transferOut(window._usbep,new Uint8Array([0x1B,0x40]));
+      for(var i=0;i<bytes.length;i+=8192){await dev.transferOut(window._usbep,bytes.slice(i,i+8192));}
+    }
     if(btn)btn.textContent='اتطبعت ✅';
   }catch(e){window._usbdev=null;toast('مشكلة الطباعة: '+(e.message||e));if(btn)btn.textContent='🖨️ طباعة حرارية (USB)';}
 }
 /* ---- الخزنة ---- */
 function drawer(){
   api('day').then(function(d){
+    window._today=d.sales||[];
     var h='<div class="cards"><div class="c"><div class="l">دخل النهارده</div><div class="v green">'+money(d.income)+'</div></div><div class="c"><div class="l">عدد الفواتير</div><div class="v">'+d.count+'</div></div></div>';
-    if(cw())h+='<div class="actions" style="margin-bottom:10px"><button class="btn sm o" id="exp">+ نثرية</button></div>';
-    h+='<div style="font-size:13px;color:var(--mut);margin-bottom:6px">فواتير النهارده</div>';
-    h+=(d.sales||[]).map(function(s){return '<div class="row"><span>'+esc(s.no)+(s.customer?' · '+esc(s.customer):'')+'</span><b>'+money(s.total)+' ج</b></div>';}).join('')||'<div class="empty">لسه مفيش بيع</div>';
+    h+='<div class="actions" style="margin-bottom:10px">'+(cw()?'<button class="btn sm o" id="exp">+ نثرية</button>':'')+'<button class="btn sm o" id="find">🔎 فاتورة برقمها</button></div>';
+    h+='<div style="font-size:13px;color:var(--mut);margin-bottom:6px">فواتير النهارده (دوس على أي واحدة تفتحها/تطبعها)</div>';
+    h+=(d.sales||[]).map(function(s){return '<div class="row" data-no="'+esc(s.no)+'" style="cursor:pointer"><span>'+esc(s.no)+(s.seller?' · '+esc(s.seller):'')+(s.customer?' · '+esc(s.customer):'')+'</span><b>'+money(s.total)+' ج</b></div>';}).join('')||'<div class="empty">لسه مفيش بيع</div>';
     el('body').innerHTML=h;
     if(el('exp'))el('exp').onclick=function(){dlg('نثرية جديدة',[{k:'amount',label:'قيمة النثرية (جنيه)',type:'number'},{k:'note',label:'على إيه؟'}],function(v){api('expense',{method:'POST',body:{amount:Number(v.amount)||0,note:v.note}}).then(function(){toast('اتسجّلت ✅');drawer();});});};
+    el('find').onclick=function(){dlg('بحث عن فاتورة',[{k:'no',label:'رقم الفاتورة (زي 261002-WV1)'}],function(v){if(!v.no){return;}api('invoice?no='+encodeURIComponent(v.no.trim())).then(function(r){if(r.ok&&r.sale)showInvoice(r.sale);else toast('مفيش فاتورة بالرقم ده');});});};
+    el('body').onclick=function(e){var r=e.target.closest('[data-no]');if(!r)return;var no=r.getAttribute('data-no');var s=(window._today||[]).find(function(x){return x.no===no;});if(s)showInvoice(s);};
   });
 }
 /* ---- موظفين ---- */
