@@ -19,7 +19,7 @@
  *   GET  /maint/api/photo           ?id=   بايتات الصورة
  *   POST /maint/api/photo           { bid, b64, mime, caption }    [إدارة]
  */
-import { loadMaint, saveMaint, cairoNow, MONTHS_AR } from './maintenance.js';
+import { loadMaint, saveMaint, cairoNow, MONTHS_AR, monthsOf, setMonthY, yearsOf, yearNow } from './maintenance.js';
 import { ICON_PNG_B64 } from './mainticon.js';
 
 const PHOTO_KEY = (id) => `maint:photo:${id}`;
@@ -39,6 +39,26 @@ function adminCode(env) {
 function viewCode(env) {
   return env.MAINT_VIEW_CODE || '1000';
 }
+function mgrCode(env) {
+  return env.MAINT_MANAGER_CODE || '0000';
+}
+/** الأكواد الحيّة: من KV لو المدير غيّرها، وإلا من البيئة. */
+async function maintCodes(env) {
+  const c = (await env.MEMORY.get('maint:codes', 'json')) || {};
+  return { admin: c.admin || adminCode(env), view: c.view || viewCode(env), manager: c.manager || mgrCode(env) };
+}
+async function loadStaff(env) {
+  const d = (await env.MEMORY.get('maint:staff', 'json')) || { seq: 0, emps: [] };
+  if (!Array.isArray(d.emps)) d.emps = [];
+  return d;
+}
+async function saveStaff(env, d) {
+  await env.MEMORY.put('maint:staff', JSON.stringify(d));
+}
+function empNet(e) {
+  const sal = Number(e.salary) || 0;
+  return Math.round(sal - (Number(e.absDays) || 0) * (sal / 24) - (Number(e.advAmount) || 0));
+}
 async function hmacHex(secret, msg) {
   const key = await crypto.subtle.importKey('raw', te.encode(secret), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
   const sig = await crypto.subtle.sign('HMAC', key, te.encode(msg));
@@ -54,7 +74,7 @@ async function verifyToken(token, env) {
   const parts = String(token).split('.');
   if (parts.length !== 3) return null;
   const [role, exp, sig] = parts;
-  if (!['admin', 'view'].includes(role)) return null;
+  if (!['admin', 'view', 'manager'].includes(role)) return null;
   if (Number(exp) < Math.floor(Date.now() / 1000)) return null;
   const good = await hmacHex(secretOf(env), `${role}.${exp}`);
   if (good !== sig) return null;
@@ -71,8 +91,8 @@ function b64ToBytes(b64) {
 function findById(data, id) {
   return data.buildings.find((b) => b.id === id || b.key === id);
 }
-function monthStatus(b, m) {
-  return b.months && b.months[m] != null;
+function monthStatus(b, m, year) {
+  return monthsOf(b, year || yearNow())[m] != null;
 }
 function hasOpenFault(b) {
   const faults = (b.events || []).filter((e) => e.type === 'fault');
@@ -107,9 +127,11 @@ export async function handleMaintWeb(request, url, env) {
   if (pathname === '/maint/api/login' && method === 'POST') {
     const body = await request.json().catch(() => ({}));
     const code = String(body.code || '').trim();
+    const cc = await maintCodes(env);
     let role = null;
-    if (code && code === adminCode(env)) role = 'admin';
-    else if (code && code === viewCode(env)) role = 'view';
+    if (code && code === cc.manager) role = 'manager';
+    else if (code && code === cc.admin) role = 'admin';
+    else if (code && code === cc.view) role = 'view';
     if (!role) return json({ ok: false, error: 'الكود غلط' }, 401);
     return json({ ok: true, role, token: await makeToken(role, env) });
   }
@@ -117,22 +139,29 @@ export async function handleMaintWeb(request, url, env) {
   // كل الباقي محتاج توكن صالح
   const role = await verifyToken(bearer(request), env);
   if (!role) return json({ ok: false, error: 'محتاج تسجيل دخول' }, 401);
-  const canWrite = role === 'admin';
+  const isManager = role === 'manager';
+  const canWrite = role === 'admin' || role === 'manager';
   const needWrite = () => json({ ok: false, error: 'صلاحيتك مشاهدة بس' }, 403);
+  const needMgr = () => json({ ok: false, error: 'للمدير بس' }, 403);
 
   const data = await loadMaint(env);
   const now = cairoNow();
 
+  if (pathname === '/maint/api/years' && method === 'GET') {
+    return json({ ok: true, years: yearsOf(data), current: yearNow() });
+  }
+
   if (pathname === '/maint/api/summary' && method === 'GET') {
     const active = data.buildings.filter((b) => b.active !== false);
+    const yr = Number(url.searchParams.get('year')) || yearNow();
     const m = Number(url.searchParams.get('month')) || now.m;
     const expected = active.reduce((s, b) => s + (b.paid || 0), 0);
-    const collected = active.reduce((s, b) => s + ((b.months && b.months[m]) || 0), 0);
-    const unpaid = active.filter((b) => !monthStatus(b, m));
+    const collected = active.reduce((s, b) => s + (monthsOf(b, yr)[m] || 0), 0);
+    const unpaid = active.filter((b) => !monthStatus(b, m, yr));
     const zones = {};
     for (const b of active) zones[b.zone || '—'] = (zones[b.zone || '—'] || 0) + 1;
     return json({
-      ok: true, role, month: m, monthName: MONTHS_AR[m - 1],
+      ok: true, role, year: yr, currentYear: yearNow(), currentMonth: now.m, month: m, monthName: MONTHS_AR[m - 1],
       total: active.length, expected, collected, due: expected - collected, unpaidCount: unpaid.length,
       faults: active.filter(hasOpenFault).length,
       zones: Object.keys(zones).sort().map((z) => ({ zone: z, count: zones[z] })),
@@ -140,14 +169,15 @@ export async function handleMaintWeb(request, url, env) {
   }
 
   if (pathname === '/maint/api/buildings' && method === 'GET') {
+    const yr = Number(url.searchParams.get('year')) || yearNow();
     const m = Number(url.searchParams.get('month')) || now.m;
     let list = data.buildings.filter((b) => b.active !== false);
     list = list.sort((a, b) => String(a.zone).localeCompare(String(b.zone), 'ar') || (a.number || 0) - (b.number || 0));
     return json({
-      ok: true, month: m,
+      ok: true, year: yr, month: m,
       buildings: list.slice(0, 1000).map((b) => ({
         id: b.id, num: b.num, zone: b.zone, name: b.name || '', value: b.value, paid: b.paid,
-        paidThisMonth: monthStatus(b, m), fault: hasOpenFault(b),
+        paidThisMonth: monthStatus(b, m, yr), fault: hasOpenFault(b),
       })),
     });
   }
@@ -164,12 +194,13 @@ export async function handleMaintWeb(request, url, env) {
     const b = findById(data, body.id);
     if (!b) return json({ ok: false, error: 'مش موجودة' }, 404);
     const m = Number(body.month) || now.m;
+    const yr = Number(body.year) || yearNow();
     const amount = Number(body.amount);
     if (!Number.isFinite(amount)) return json({ ok: false, error: 'مبلغ غلط' }, 400);
-    b.months = b.months || {};
-    b.months[m] = amount;
+    setMonthY(b, yr, m, amount);
+    if (String(b.year) === String(yr)) { b.months = b.months || {}; b.months[m] = amount; }
     b.events = b.events || [];
-    b.events.push({ type: 'payment', text: `اتحصّل ${amount} ج عن ${MONTHS_AR[m - 1]}`, amount, month: m, by: role, at: body.at || now.iso });
+    b.events.push({ type: 'payment', text: `اتحصّل ${amount} ج عن ${MONTHS_AR[m - 1]} ${yr}`, amount, month: m, year: yr, by: role, at: body.at || now.iso });
     b.updatedAt = now.iso;
     await saveMaint(env, data);
     return json({ ok: true, building: b });
@@ -247,6 +278,87 @@ export async function handleMaintWeb(request, url, env) {
       }
     }
     return json({ ok: true, count: out.length, contacts: out });
+  }
+
+  /* ---------- الموظفين والرواتب ---------- */
+  if (pathname === '/maint/api/staff' && method === 'GET') {
+    const sd = await loadStaff(env);
+    const emps = sd.emps.map((e) => {
+      const base = { id: e.id, name: e.name, advAmount: Number(e.advAmount) || 0, absDays: Number(e.absDays) || 0, lastPaidAt: e.lastPaidAt || null };
+      if (isManager) { base.salary = Number(e.salary) || 0; base.net = empNet(e); base.dayVal = Math.round((Number(e.salary) || 0) / 24); }
+      return base;
+    });
+    return json({ ok: true, role, isManager, canWrite, emps });
+  }
+  if (pathname === '/maint/api/staff/detail' && method === 'GET') {
+    const sd = await loadStaff(env);
+    const e = sd.emps.find((x) => x.id === url.searchParams.get('id'));
+    if (!e) return json({ ok: false, error: 'مش موجود' }, 404);
+    const out = { id: e.id, name: e.name, advAmount: Number(e.advAmount) || 0, absDays: Number(e.absDays) || 0, events: e.events || [], history: e.history || [], lastPaidAt: e.lastPaidAt || null };
+    if (isManager) { out.salary = Number(e.salary) || 0; out.net = empNet(e); out.dayVal = Math.round((Number(e.salary) || 0) / 24); }
+    return json({ ok: true, isManager, canWrite, emp: out });
+  }
+  if (pathname === '/maint/api/staff/add' && method === 'POST') {
+    if (!isManager) return needMgr();
+    const b = await request.json().catch(() => ({}));
+    const name = String(b.name || '').trim();
+    if (!name) return json({ ok: false, error: 'اكتب اسم الموظف' }, 400);
+    const sd = await loadStaff(env);
+    sd.emps.push({ id: `e${++sd.seq}`, name, salary: Number(b.salary) || 0, advAmount: 0, absDays: 0, events: [], history: [], createdAt: now.iso, updatedAt: now.iso });
+    await saveStaff(env, sd);
+    return json({ ok: true });
+  }
+  if (pathname === '/maint/api/staff/salary' && method === 'POST') {
+    if (!isManager) return needMgr();
+    const b = await request.json().catch(() => ({}));
+    const sd = await loadStaff(env);
+    const e = sd.emps.find((x) => x.id === b.id);
+    if (!e) return json({ ok: false, error: 'مش موجود' }, 404);
+    e.salary = Number(b.salary) || 0; e.updatedAt = now.iso;
+    await saveStaff(env, sd);
+    return json({ ok: true });
+  }
+  if ((pathname === '/maint/api/staff/advance' || pathname === '/maint/api/staff/absence') && method === 'POST') {
+    if (!canWrite) return needWrite();
+    const b = await request.json().catch(() => ({}));
+    const sd = await loadStaff(env);
+    const e = sd.emps.find((x) => x.id === b.id);
+    if (!e) return json({ ok: false, error: 'مش موجود' }, 404);
+    e.events = e.events || [];
+    if (pathname.endsWith('advance')) {
+      const amt = Number(b.amount) || 0;
+      e.advAmount = (Number(e.advAmount) || 0) + amt;
+      e.events.push({ type: 'advance', amount: amt, text: String(b.note || ''), by: role, at: now.iso });
+    } else {
+      const d = Number(b.days) || 0;
+      e.absDays = (Number(e.absDays) || 0) + d;
+      e.events.push({ type: 'absence', days: d, text: String(b.note || ''), by: role, at: now.iso });
+    }
+    e.updatedAt = now.iso;
+    await saveStaff(env, sd);
+    return json({ ok: true });
+  }
+  if (pathname === '/maint/api/staff/paid' && method === 'POST') {
+    if (!isManager) return needMgr();
+    const b = await request.json().catch(() => ({}));
+    const sd = await loadStaff(env);
+    const e = sd.emps.find((x) => x.id === b.id);
+    if (!e) return json({ ok: false, error: 'مش موجود' }, 404);
+    e.history = e.history || [];
+    e.history.push({ paidAt: now.iso, salary: Number(e.salary) || 0, advAmount: Number(e.advAmount) || 0, absDays: Number(e.absDays) || 0, net: empNet(e) });
+    e.events = e.events || [];
+    e.events.push({ type: 'paid', amount: empNet(e), text: 'تم القبض', by: role, at: now.iso });
+    e.advAmount = 0; e.absDays = 0; e.lastPaidAt = now.iso; e.updatedAt = now.iso;
+    await saveStaff(env, sd);
+    return json({ ok: true });
+  }
+  if (pathname === '/maint/api/staff/remove' && method === 'POST') {
+    if (!isManager) return needMgr();
+    const b = await request.json().catch(() => ({}));
+    const sd = await loadStaff(env);
+    sd.emps = sd.emps.filter((x) => x.id !== b.id);
+    await saveStaff(env, sd);
+    return json({ ok: true });
   }
 
   if (pathname === '/maint/api/photo' && method === 'GET') {
@@ -380,7 +492,7 @@ const APP_HTML = `<!doctype html>
 <div class="overlay" id="ov"><div class="sheet" id="sheet"></div></div>
 <script>
 var T=localStorage.getItem('maint_token')||'', ROLE=localStorage.getItem('maint_role')||'';
-var MONTH=0, SELMONTH=lsGet('maint_selmonth')||0, ZONE='', Q='', FAULTSONLY=false, CUR=null, SUM=null, LIST=[], DET={}, OFF=false;
+var MONTH=0, SELMONTH=0, SELYEAR=0, CURYEAR=0, CURMONTH=0, YEARS=[], ZONE='', Q='', FAULTSONLY=false, CUR=null, SUM=null, LIST=[], DET={}, OFF=false;
 var MON=['يناير','فبراير','مارس','ابريل','مايو','يونيو','يوليو','اغسطس','سبتمبر','اكتوبر','نوفمبر','ديسمبر'];
 var MSH=['ينا','فبر','مار','ابر','ماي','يون','يول','اغس','سبت','اكت','نوف','ديس'];
 var EVT={fault:'🔴 عطل',problem:'⚠️ مشكلة',measure:'📐 مقايسة',part:'🔩 قطعة غيار',maintenance:'🔧 صيانة اتعملت',pending:'📌 مطلوب',note:'📝 مذكرة',photo:'📷 صورة',payment:'💵 دفع'};
@@ -390,8 +502,13 @@ function el(id){return document.getElementById(id);}
 function dlabel(iso){try{var d=new Date(iso);return d.getUTCDate()+'/'+(d.getUTCMonth()+1);}catch(e){return '';}}
 function lsGet(k){try{var v=localStorage.getItem(k);return v?JSON.parse(v):null;}catch(e){return null;}}
 function lsSet(k,v){try{localStorage.setItem(k,JSON.stringify(v));return true;}catch(e){return false;}}
+SELMONTH=lsGet('maint_selmonth')||0;SELYEAR=lsGet('maint_selyear')||0;
+function monthsFor(b,y){y=String(y);if(b.monthsY&&b.monthsY[y])return b.monthsY[y];if(b.months&&String(b.year||CURYEAR)===y)return b.months;return {};}
+function sha256(s){return crypto.subtle.digest('SHA-256',new TextEncoder().encode(s)).then(function(buf){return Array.prototype.map.call(new Uint8Array(buf),function(b){return ('0'+b.toString(16)).slice(-2);}).join('');});}
 
-function logout(){localStorage.removeItem('maint_token');localStorage.removeItem('maint_role');T='';ROLE='';renderLogin();}
+function logout(){localStorage.removeItem('maint_token');localStorage.removeItem('maint_role');localStorage.removeItem('maint_pin');T='';ROLE='';renderLogin();}
+function cw(){return ROLE==='admin'||ROLE==='manager';}
+function mgr(){return ROLE==='manager';}
 
 /* ---- شبكة ---- */
 function apiGet(path){
@@ -442,8 +559,18 @@ function doLogin(){
   var code=el('code').value.trim();
   fetch('/maint/api/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({code:code})}).then(function(r){return r.json();}).then(function(d){
     if(!d.ok){el('lerr').textContent=d.error||'غلط';return;}
-    T=d.token;ROLE=d.role;localStorage.setItem('maint_token',T);localStorage.setItem('maint_role',ROLE);renderHome();
+    T=d.token;ROLE=d.role;localStorage.setItem('maint_token',T);localStorage.setItem('maint_role',ROLE);
+    sha256(code).then(function(h){localStorage.setItem('maint_pin',h);renderHome();});
   }).catch(function(){el('lerr').textContent='حصلت مشكلة، جرّب تاني';});
+}
+/* قفل: يطلب الكود كل مرة تفتح الأيقونة (بيشتغل أوفلاين كمان) */
+function renderLock(){
+  el('app').innerHTML='<div class="center"><div class="login"><div style="font-size:20px;font-weight:600;color:var(--g)">🔒 صيانة توب باور</div><div class="muted" style="margin-top:6px">اكتب الكود عشان تدخل</div><input id="code" type="tel" inputmode="numeric" placeholder="كود" maxlength="8"><div class="err" id="lerr"></div><button class="btn" style="width:100%" id="unlockBtn">فتح</button><div style="margin-top:10px"><a id="relog" style="font-size:12px;cursor:pointer">مستخدم تاني؟</a></div></div></div>';
+  var i=el('code');i.focus();
+  function go(){var code=el('code').value.trim();sha256(code).then(function(h){if(h===localStorage.getItem('maint_pin')){renderHome();}else{el('lerr').textContent='الكود غلط';}});}
+  i.addEventListener('keydown',function(e){if(e.key==='Enter')go();});
+  el('unlockBtn').addEventListener('click',go);
+  el('relog').addEventListener('click',logout);
 }
 
 /* ---- الرئيسية ---- */
@@ -451,13 +578,14 @@ function renderHome(){
   FAULTSONLY=false;
   el('app').innerHTML='<header><div class="t">🏢 صيانة توب باور</div><span class="badge" id="mlabel">...</span></header><div class="netbar" id="netbar"></div><div class="pad" id="body"><div class="empty">بحمّل...</div></div>';
   updateNet();flush();
-  var mp=SELMONTH?('?month='+SELMONTH):'';
-  Promise.all([apiGet('summary'+mp),apiGet('buildings'+mp)]).then(function(res){
-    SUM=res[0];LIST=res[1].buildings||[];MONTH=SUM.month;OFF=false;
-    lsSet('maint_sum',SUM);lsSet('maint_list',LIST);lsSet('maint_month',MONTH);
+  var qp='?'+(SELMONTH?('month='+SELMONTH+'&'):'')+(SELYEAR?('year='+SELYEAR):'');
+  Promise.all([apiGet('summary'+qp),apiGet('buildings'+qp),apiGet('years').catch(function(){return null;})]).then(function(res){
+    SUM=res[0];LIST=res[1].buildings||[];MONTH=SUM.month;SELYEAR=SUM.year;CURYEAR=SUM.currentYear;CURMONTH=SUM.currentMonth;OFF=false;
+    if(res[2]&&res[2].years){YEARS=res[2].years;lsSet('maint_years',YEARS);}
+    lsSet('maint_sum',SUM);lsSet('maint_list',LIST);lsSet('maint_month',MONTH);lsSet('maint_selyear',SELYEAR);lsSet('maint_cur',{y:CURYEAR,m:CURMONTH});
     paintHome();
   }).catch(function(){
-    SUM=lsGet('maint_sum');LIST=lsGet('maint_list')||[];MONTH=lsGet('maint_month')||1;OFF=true;
+    SUM=lsGet('maint_sum');LIST=lsGet('maint_list')||[];MONTH=lsGet('maint_month')||1;YEARS=lsGet('maint_years')||[];var cc=lsGet('maint_cur')||{};CURYEAR=cc.y||MONTH&&new Date().getFullYear();CURMONTH=cc.m||1;SELYEAR=lsGet('maint_selyear')||CURYEAR;OFF=true;
     if(!SUM){el('body').innerHTML='<div class="empty">محتاج نت أول مرة بس — افتحه وإنت على النت مرة واحدة وبعدها هيشتغل أوفلاين.</div>';return;}
     paintHome();
   });
@@ -472,15 +600,16 @@ function recompute(){ // يحدّث أرقام الملخص من القائمة 
 }
 function paintHome(){
   recompute();
-  el('mlabel').textContent=(SUM.monthName||'')+' ▾';el('mlabel').style.cursor='pointer';el('mlabel').onclick=changeMonth;updateNet();
+  el('mlabel').textContent=(SUM.monthName||'')+' '+(SELYEAR||'')+' ▾';el('mlabel').style.cursor='pointer';el('mlabel').onclick=changeMonth;updateNet();
   var h='<div class="cards">'+card('المطلوب',money(SUM.expected),'')+card('المتحصّل',money(SUM.collected),'green')+card('المتبقّي',money((SUM.expected||0)-(SUM.collected||0)),'redc')+card('ما دفعوش',SUM.unpaidCount,'redc')+'</div>';
-  h+='<div class="actions"><button class="btn sm" id="faultsBtn">🔴 أعطال ('+SUM.faults+')</button>'+(ROLE==='admin'?'<button class="btn sm o" id="bcBtn">📢 تحذير جماعي</button><button class="btn sm o" id="addBtn">+ عملية</button>':'')+'<button class="btn sm o" id="logoutBtn">خروج</button></div>';
+  h+='<div class="actions"><button class="btn sm" id="faultsBtn">🔴 أعطال ('+SUM.faults+')</button><button class="btn sm o" id="staffBtn">👷 الموظفين</button>'+(cw()?'<button class="btn sm o" id="bcBtn">📢 تحذير جماعي</button><button class="btn sm o" id="addBtn">+ عملية</button>':'')+'<button class="btn sm o" id="logoutBtn">خروج</button></div>';
   h+='<div class="search">🔎<input id="q" placeholder="دوّر على عمارة (زي 90ج)"></div>';
   h+='<div class="chips" id="chips"></div><div id="list"></div>';
   el('body').innerHTML=h;el('q').value=Q;
   el('logoutBtn').addEventListener('click',logout);
   el('faultsBtn').addEventListener('click',function(){FAULTSONLY=!FAULTSONLY;loadList();});
-  if(ROLE==='admin'){el('addBtn').addEventListener('click',addBuilding);el('bcBtn').addEventListener('click',broadcast);}
+  el('staffBtn').addEventListener('click',openStaff);
+  if(cw()){el('addBtn').addEventListener('click',addBuilding);el('bcBtn').addEventListener('click',broadcast);}
   var zc={};LIST.forEach(function(b){zc[b.zone||'—']=(zc[b.zone||'—']||0)+1;});
   var zs=Object.keys(zc).sort();
   var chips='<span class="chip '+(ZONE===''?'on':'')+'" data-z="">الكل</span>';
@@ -493,12 +622,19 @@ function paintHome(){
 }
 function card(l,v,cls){return '<div class="c"><div class="l">'+l+'</div><div class="v '+cls+'">'+v+'</div></div>';}
 function changeMonth(){
-  var h='<header><div class="t">اختار الشهر</div><span class="badge" id="closeB" style="cursor:pointer">✕</span></header><div class="pad"><div class="months" id="mpick">';
+  var years=YEARS&&YEARS.length?YEARS.slice():[String(CURYEAR||new Date().getFullYear())];
+  if(years.indexOf(String(CURYEAR))<0)years.push(String(CURYEAR));
+  years=years.filter(function(v,i,a){return a.indexOf(v)===i;}).sort();
+  var h='<header><div class="t">اختار السنة والشهر</div><span class="badge" id="closeB" style="cursor:pointer">✕</span></header><div class="pad">';
+  h+='<div class="sec">السنة</div><div class="chips" id="ypick">';
+  years.forEach(function(y){h+='<span class="chip '+(Number(y)===SELYEAR?'on':'')+'" data-y="'+y+'">'+y+'</span>';});
+  h+='</div><div class="sec">الشهر</div><div class="months" id="mpick">';
   for(var m=1;m<=12;m++){var on=(m===MONTH);h+='<div class="mo '+(on?'pd':'')+'" data-m="'+m+'" style="cursor:pointer;font-size:14px;padding:15px 0">'+MON[m-1]+'</div>';}
-  h+='</div><div class="muted" style="text-align:center">الشهر الأخضر هو اللي إنت شايفه دلوقتي</div></div>';
+  h+='</div></div>';
   el('sheet').innerHTML=h;el('ov').style.display='flex';
   el('closeB').addEventListener('click',function(){el('ov').style.display='none';});
-  el('mpick').addEventListener('click',function(e){var c=e.target.closest('.mo');if(!c)return;var m=Number(c.getAttribute('data-m'));SELMONTH=m;lsSet('maint_selmonth',m);el('ov').style.display='none';renderHome();});
+  el('ypick').addEventListener('click',function(e){var c=e.target.closest('.chip');if(!c)return;SELYEAR=Number(c.getAttribute('data-y'));lsSet('maint_selyear',SELYEAR);el('ov').style.display='none';renderHome();});
+  el('mpick').addEventListener('click',function(e){var c=e.target.closest('.mo');if(!c)return;SELMONTH=Number(c.getAttribute('data-m'));lsSet('maint_selmonth',SELMONTH);el('ov').style.display='none';renderHome();});
 }
 function loadList(){
   var q=(Q||'').trim().toLowerCase();
@@ -526,15 +662,16 @@ function openB(id){
   });
 }
 function renderB(b){
-  CUR=b;var adm=ROLE==='admin';
+  CUR=b;var adm=cw();
   var cts=(b.contacts&&b.contacts.length)?b.contacts:((b.unionHead||b.unionPhone)?[{name:b.unionHead||'',phone:b.unionPhone||''}]:[]);
   var uni=cts.length?cts.map(function(c){var w=c.phone?(' <a class="btn sm" target="_blank" href="https://wa.me/'+String(c.phone).replace(/[^0-9]/g,'').replace(/^0/,'20')+'?text='+encodeURIComponent('بخصوص صيانة '+b.num)+'">واتساب</a>'):'';return '👤 '+esc(c.name||'رئيس اتحاد')+(c.phone?' · '+esc(c.phone):'')+w;}).join('<br>'):'<span class="muted">مفيش رئيس اتحاد مسجّل</span>';
   var h='<header><div class="t">'+esc(b.num)+'</div><span class="badge" id="closeB" style="cursor:pointer">✕ إغلاق</span></header><div class="pad">';
   h+='<div class="muted">منطقة '+esc(b.zone)+' · القيمة '+money(b.value)+' · المدفوع '+money(b.paid)+' · الغفير '+money(b.guard)+'</div>';
   h+='<div style="margin:9px 0;line-height:2">'+uni+(adm?' <button class="btn sm o" id="edUnion">تعديل</button>':'')+'</div>';
   if(b.driveFolder)h+='<div style="margin:6px 0"><a class="btn sm o" target="_blank" href="'+esc(b.driveFolder)+'">📁 فولدر الصور/الفيديو</a></div>';
-  h+='<div class="sec">التحصيل الشهري'+(adm?' — دوس الشهر عشان تسجّل':'')+'</div><div class="months" id="months">';
-  for(var m=1;m<=12;m++){var pd=b.months&&b.months[m]!=null;var cls=pd?'pd':(m<=MONTH?'un':'');h+='<div class="mo '+cls+'" data-m="'+m+'">'+MSH[m-1]+'<br>'+(pd?money(b.months[m]):'—')+'</div>';}
+  var mths=monthsFor(b,SELYEAR);
+  h+='<div class="sec">التحصيل الشهري — سنة '+SELYEAR+(adm?' (دوس الشهر عشان تسجّل)':'')+'</div><div class="months" id="months">';
+  for(var m=1;m<=12;m++){var pd=mths[m]!=null;var past=(SELYEAR<CURYEAR)||(SELYEAR===CURYEAR&&m<=CURMONTH);var cls=pd?'pd':(past?'un':'');h+='<div class="mo '+cls+'" data-m="'+m+'">'+MSH[m-1]+'<br>'+(pd?money(mths[m]):'—')+'</div>';}
   h+='</div>';
   if(adm){h+='<div class="actions" id="evBtns"><button class="btn sm" data-t="fault">🔴 عطل</button><button class="btn sm o" data-t="problem">⚠️ مشكلة</button><button class="btn sm o" data-t="measure">📐 مقايسة</button><button class="btn sm o" data-t="part">🔩 قطعة غيار</button><button class="btn sm o" data-t="maintenance">🔧 صيانة</button><button class="btn sm o" data-t="note">📝 مذكرة</button></div>';}
   h+='<div class="sec">السجل (الأحدث أولاً)</div>';
@@ -561,12 +698,13 @@ function saveCur(){DET[CUR.id]=CUR;lsSet('maint_det_'+CUR.id,CUR);}
 function listItem(id){for(var i=0;i<LIST.length;i++)if(LIST[i].id===id)return LIST[i];return null;}
 function payMonth(m){
   var def=(CUR&&CUR.paid)||'';
-  var v=prompt('العمارة '+CUR.num+' — دفعت كام عن '+MON[m-1]+'؟',def);
+  var v=prompt('العمارة '+CUR.num+' — دفعت كام عن '+MON[m-1]+' '+SELYEAR+'؟',def);
   if(v==null)return;var amount=Number(String(v).replace(/[^0-9.]/g,''));if(isNaN(amount))return;
-  CUR.months=CUR.months||{};CUR.months[m]=amount;
-  (CUR.events=CUR.events||[]).push({type:'payment',text:'اتحصّل '+amount+' ج عن '+MON[m-1],amount:amount,month:m,by:ROLE,at:new Date().toISOString()});
-  if(m===MONTH){var li=listItem(CUR.id);if(li)li.paidThisMonth=true;if(SUM)SUM.collected=(SUM.collected||0)+amount;}
-  saveCur();enqueue('pay',{id:CUR.id,month:m,amount:amount,at:new Date().toISOString()});renderB(CUR);
+  var y=String(SELYEAR);CUR.monthsY=CUR.monthsY||{};if(!CUR.monthsY[y])CUR.monthsY[y]=(CUR.months&&String(CUR.year||CURYEAR)===y)?Object.assign({},CUR.months):{};CUR.monthsY[y][m]=amount;
+  if(String(CUR.year)===y){CUR.months=CUR.months||{};CUR.months[m]=amount;}
+  (CUR.events=CUR.events||[]).push({type:'payment',text:'اتحصّل '+amount+' ج عن '+MON[m-1]+' '+SELYEAR,amount:amount,month:m,year:SELYEAR,by:ROLE,at:new Date().toISOString()});
+  if(m===MONTH&&SUM&&SELYEAR===SUM.year){var li=listItem(CUR.id);if(li)li.paidThisMonth=true;SUM.collected=(SUM.collected||0)+amount;}
+  saveCur();enqueue('pay',{id:CUR.id,month:m,year:SELYEAR,amount:amount,at:new Date().toISOString()});renderB(CUR);
 }
 function addEv(type){
   var label=EVT[type]||'';
@@ -619,10 +757,69 @@ function broadcast(){
   }).catch(function(){alert('التحذير الجماعي محتاج نت.');});
 }
 
+/* ---- الموظفين والرواتب ---- */
+function openStaff(){
+  fetch('/maint/api/staff',{headers:{Authorization:'Bearer '+T}}).then(function(r){return r.json();}).then(function(d){
+    if(!d.ok)return;
+    var h='<header><div class="t">👷 الموظفين</div><span class="badge" id="closeB" style="cursor:pointer">✕</span></header><div class="pad">';
+    if(d.isManager)h+='<div class="muted" style="margin-bottom:8px">الراتب والقبض بيبانوا لك إنت بس 🔒</div>';
+    if(d.canWrite&&d.isManager)h+='<div class="actions"><button class="btn sm" id="addEmp">+ موظف</button></div>';
+    h+='<div id="emps" style="margin-top:8px">';
+    if(!d.emps.length)h+='<div class="empty">مفيش موظفين لسه'+(d.isManager?' — دوس "+ موظف"':'')+'</div>';
+    d.emps.forEach(function(e){
+      var extra=(d.isManager?(' · القبض '+money(e.net)+' ج'):'');
+      h+='<div class="row" data-id="'+esc(e.id)+'"><div><div class="n">'+esc(e.name)+'</div><div class="s">سلف: '+money(e.advAmount)+' ج · غياب: '+(e.absDays||0)+' يوم'+extra+'</div></div><div style="color:var(--mut)">›</div></div>';
+    });
+    h+='</div></div>';
+    el('sheet').innerHTML=h;el('ov').style.display='flex';
+    el('closeB').addEventListener('click',closeB);
+    if(el('addEmp'))el('addEmp').addEventListener('click',addEmp);
+    el('emps').addEventListener('click',function(ev){var r=ev.target.closest('.row');if(r)openEmp(r.getAttribute('data-id'));});
+  }).catch(function(){alert('الموظفين محتاج نت.');});
+}
+function addEmp(){
+  var name=prompt('اسم الموظف:','');if(!name)return;
+  var sal=prompt('راتبه (اللي بيتحسب عليه، هيتقسم على 24 لليوم):','');if(sal==null)return;
+  fetch('/maint/api/staff/add',{method:'POST',headers:{'Content-Type':'application/json',Authorization:'Bearer '+T},body:JSON.stringify({name:name,salary:Number(sal)||0})}).then(function(r){return r.json();}).then(function(d){if(d.ok)openStaff();else alert(d.error||'مشكلة');});
+}
+function openEmp(id){
+  fetch('/maint/api/staff/detail?id='+encodeURIComponent(id),{headers:{Authorization:'Bearer '+T}}).then(function(r){return r.json();}).then(function(d){
+    if(!d.ok)return;var e=d.emp;
+    var h='<header><div class="t">'+esc(e.name)+'</div><span class="badge" id="backStaff" style="cursor:pointer">‹ رجوع</span></header><div class="pad">';
+    if(d.isManager){
+      h+='<div class="cards"><div class="c"><div class="l">الراتب</div><div class="v">'+money(e.salary)+'</div></div><div class="c"><div class="l">اليوم (÷24)</div><div class="v">'+money(e.dayVal)+'</div></div></div>';
+      h+='<div class="c" style="background:var(--gl);margin-bottom:12px"><div class="l">صافي القبض لحد دلوقتي</div><div class="v green">'+money(e.net)+' ج</div></div>';
+    }
+    h+='<div class="cards"><div class="c"><div class="l">سلف الفترة</div><div class="v redc">'+money(e.advAmount)+'</div></div><div class="c"><div class="l">غياب الفترة</div><div class="v redc">'+(e.absDays||0)+' يوم</div></div></div>';
+    if(d.canWrite)h+='<div class="actions"><button class="btn sm" data-a="adv">+ سلفة</button><button class="btn sm o" data-a="abs">+ غياب</button>'+(d.isManager?'<button class="btn sm o" data-a="sal">تعديل الراتب</button><button class="btn sm" data-a="paid" style="background:var(--g)">✅ تم القبض</button><button class="btn sm o" data-a="del">حذف</button>':'')+'</div>';
+    h+='<div class="sec">الحركة (الأحدث أولاً)</div>';
+    var evs=(e.events||[]).slice().reverse();
+    h+=evs.length?evs.map(function(x){var lbl=x.type==="advance"?("💵 سلفة "+money(x.amount)+" ج"):x.type==="absence"?("🚫 غياب "+(x.days||0)+" يوم"):x.type==="paid"?("✅ تم القبض"+(d.isManager?(" ("+money(x.amount)+" ج)"):"")):"📝";return '<div class="ev">'+lbl+' · '+dlabel(x.at)+(x.text?' — '+esc(x.text):'')+'</div>';}).join(''):'<div class="muted">لسه مفيش</div>';
+    h+='</div>';
+    el('sheet').innerHTML=h;
+    el('backStaff').addEventListener('click',openStaff);
+    var box=el('sheet');
+    box.addEventListener('click',function(ev){var btn=ev.target.closest('button[data-a]');if(!btn)return;empAction(btn.getAttribute('data-a'),e);});
+  });
+}
+function empAction(a,e){
+  if(a==='adv'){var amt=prompt('قيمة السلفة:','');if(amt==null)return;var n=prompt('ملاحظة (اختياري):','')||'';staffPost('advance',{id:e.id,amount:Number(amt)||0,note:n},e.id);}
+  else if(a==='abs'){var d=prompt('غاب كام يوم؟','1');if(d==null)return;var n2=prompt('ملاحظة (اختياري):','')||'';staffPost('absence',{id:e.id,days:Number(d)||0,note:n2},e.id);}
+  else if(a==='sal'){var s=prompt('الراتب الجديد:',e.salary||'');if(s==null)return;staffPost('salary',{id:e.id,salary:Number(s)||0},e.id);}
+  else if(a==='paid'){if(!confirm('تأكيد: تم قبض '+e.name+'؟ هنبدأ فترة جديدة (السلف والغياب يتصفّروا).'))return;staffPost('paid',{id:e.id},e.id);}
+  else if(a==='del'){if(!confirm('حذف '+e.name+' نهائيًا؟'))return;staffPost('remove',{id:e.id},null);}
+}
+function staffPost(path,body,reopenId){
+  fetch('/maint/api/staff/'+path,{method:'POST',headers:{'Content-Type':'application/json',Authorization:'Bearer '+T},body:JSON.stringify(body)}).then(function(r){return r.json();}).then(function(d){if(d.ok){if(reopenId)openEmp(reopenId);else openStaff();}else alert(d.error||'مشكلة');}).catch(function(){alert('محتاج نت.');});
+}
+
 window.addEventListener('online',function(){OFF=false;flush(function(){if(el('mlabel'))renderHome();});});
 window.addEventListener('offline',function(){OFF=true;updateNet();});
 if('serviceWorker' in navigator){navigator.serviceWorker.register('/maint/sw.js',{scope:'/maint'}).catch(function(){});}
-if(T&&ROLE)renderHome();else renderLogin();
+// قفل بالكود كل مرة تفتح الأيقونة
+if(T&&ROLE&&localStorage.getItem('maint_pin'))renderLock();
+else if(T&&ROLE)renderHome();
+else renderLogin();
 </script>
 </body>
 </html>`;

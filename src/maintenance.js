@@ -106,6 +106,34 @@ export async function saveMaint(env, data) {
   await env.MEMORY.put(DATA_KEY, JSON.stringify(data));
 }
 
+/* ---------- السنين: التحصيل محفوظ لكل سنة لوحدها (b.monthsY[السنة][الشهر]) ---------- */
+export function yearNow() {
+  return cairoNow().y;
+}
+/** شهور عملية في سنة معيّنة (مع دعم الصيغة القديمة b.months لسنة b.year). */
+export function monthsOf(b, year) {
+  const y = String(year);
+  if (b.monthsY && b.monthsY[y]) return b.monthsY[y];
+  if (b.months && String(b.year || yearNow()) === y) return b.months; // قديم
+  return {};
+}
+/** يسجّل تحصيل شهر في سنة (وينقل القديم للسنة بتاعته أول مرة). */
+export function setMonthY(b, year, m, amount) {
+  const y = String(year);
+  if (!b.monthsY) b.monthsY = {};
+  if (!b.monthsY[y]) b.monthsY[y] = b.months && String(b.year || yearNow()) === y ? { ...b.months } : {};
+  b.monthsY[y][m] = amount;
+}
+/** كل السنين اللي فيها داتا + السنة الحالية. */
+export function yearsOf(data) {
+  const s = new Set([String(yearNow())]);
+  for (const b of data.buildings) {
+    if (b.monthsY) for (const y of Object.keys(b.monthsY)) if (Object.keys(b.monthsY[y]).length) s.add(y);
+    if (b.year && b.months && Object.keys(b.months).length) s.add(String(b.year));
+  }
+  return [...s].sort();
+}
+
 /* ---------- استيراد شيت إنياد/جوجل (تحصيل صيانة) ---------- */
 /** أعمدة الشيت: A عدد | B رقم العملية | C القيمة | D المدفوع | E..P شهر 1..12 */
 const MONTH_COLS = ['E', 'F', 'G', 'H', 'I', 'J', 'K', 'L', 'M', 'N', 'O', 'P'];
@@ -121,11 +149,12 @@ export function isMaintenanceSheet(rows) {
  * الحقول الجديدة (رئيس الاتحاد، الصور، المشاكل...).
  * @returns {Promise<{count:number, added:number, updated:number}>}
  */
-export async function importMaintenanceSheet(env, rows) {
+export async function importMaintenanceSheet(env, rows, importYear) {
   const data = await loadMaint(env);
   const byKey = new Map(data.buildings.map((b) => [b.key, b]));
   let added = 0, updated = 0, count = 0;
   const now = cairoNow();
+  const yr = String(importYear || now.y);
 
   for (const r of rows) {
     const rawNum = (r.B || '').trim();
@@ -158,8 +187,9 @@ export async function importMaintenanceSheet(env, rows) {
         collector: '',
         contacts: [], // [{name, phone}] — رئيس الاتحاد وتليفونه (لحد اتنين)
         active: true,
-        year: now.y,
+        year: Number(yr),
         months,
+        monthsY: { [yr]: months },
         events: [],
         photos: [],
         createdAt: now.iso,
@@ -173,7 +203,9 @@ export async function importMaintenanceSheet(env, rows) {
       b.value = value;
       b.paid = paid;
       b.guard = value != null && paid != null ? value - paid : b.guard;
-      b.months = { ...b.months, ...months };
+      b.monthsY = b.monthsY || {};
+      b.monthsY[yr] = { ...(b.monthsY[yr] || {}), ...months };
+      if (String(b.year) === yr) b.months = { ...b.months, ...months };
       b.zone = zone || b.zone;
       b.number = number ?? b.number;
       b.updatedAt = now.iso;
@@ -236,14 +268,17 @@ function renderBuilding(b) {
   for (const c of getContacts(b))
     lines.push(`👤 رئيس الاتحاد: ${c.name || '—'}${c.phone ? ` · ${c.phone}` : ''}`);
 
-  // التحصيل الشهري
+  // التحصيل الشهري (السنة الحالية)
+  const yr = yearNow();
+  const mths = monthsOf(b, yr);
   const paidMonths = [];
   const unpaid = [];
   for (let m = 1; m <= 12; m++) {
-    if (b.months && b.months[m] != null) paidMonths.push(`${MONTH_SHORT[m - 1]} ${fmtMoney(b.months[m])}`);
+    if (mths[m] != null) paidMonths.push(`${MONTH_SHORT[m - 1]} ${fmtMoney(mths[m])}`);
     else unpaid.push(MONTH_SHORT[m - 1]);
   }
   lines.push('');
+  lines.push(`🗓️ سنة ${yr}`);
   lines.push(`✅ دَفَع: ${paidMonths.length ? paidMonths.join(' · ') : '—'}`);
   if (unpaid.length) lines.push(`❌ فاضل: ${unpaid.join(' · ')}`);
 
@@ -266,18 +301,20 @@ function renderBuilding(b) {
 }
 
 /* ---------- تقرير "مين ما دفعش" ---------- */
-function unpaidReport(data, month) {
+function unpaidReport(data, month, year) {
+  const yr = year || yearNow();
   const active = data.buildings.filter((b) => b.active !== false);
-  const unpaid = active.filter((b) => !(b.months && b.months[month] != null));
+  const val = (b) => monthsOf(b, yr)[month];
+  const unpaid = active.filter((b) => val(b) == null);
   const expected = active.reduce((s, b) => s + (b.paid || 0), 0);
-  const collected = active.reduce((s, b) => s + ((b.months && b.months[month]) || 0), 0);
+  const collected = active.reduce((s, b) => s + (val(b) || 0), 0);
   const due = unpaid.reduce((s, b) => s + (b.paid || 0), 0);
 
   const byZone = {};
   for (const b of unpaid) (byZone[b.zone || '—'] ||= []).push(b);
 
   const head =
-    `📋 *${MONTHS_AR[month - 1]} (شهر ${month})* — ما دفعوش: ${unpaid.length} من ${active.length}\n` +
+    `📋 *${MONTHS_AR[month - 1]} ${yr}* — ما دفعوش: ${unpaid.length} من ${active.length}\n` +
     `💰 المطلوب ${fmtMoney(expected)} · المتحصّل ${fmtMoney(collected)} · المتبقّي ${fmtMoney(due)} ج`;
 
   const zones = Object.keys(byZone).sort();
@@ -295,7 +332,8 @@ function unpaidReport(data, month) {
 }
 
 /* ---------- شيت Excel ---------- */
-export function buildMaintenanceXlsx(data) {
+export function buildMaintenanceXlsx(data, year) {
+  const yr = year || yearNow();
   const header = [
     'م', 'رقم العملية', 'المنطقة', 'الاسم', 'العنوان',
     'رئيس الاتحاد 1', 'تليفون 1', 'رئيس الاتحاد 2', 'تليفون 2', 'المحصّل',
@@ -306,8 +344,9 @@ export function buildMaintenanceXlsx(data) {
   );
   const rows = [header];
   buildings.forEach((b, i) => {
+    const mths = monthsOf(b, yr);
     const months = [];
-    for (let m = 1; m <= 12; m++) months.push(b.months && b.months[m] != null ? b.months[m] : '');
+    for (let m = 1; m <= 12; m++) months.push(mths[m] != null ? mths[m] : '');
     // آخر مشكلة/ملاحظة للعرض
     const lastNote = (b.events || [])
       .filter((e) => ['problem', 'measure', 'pending', 'note'].includes(e.type))
@@ -320,7 +359,7 @@ export function buildMaintenanceXlsx(data) {
       lastNote ? lastNote.text : (b.active === false ? 'خرجت' : ''),
     ]);
   });
-  return buildTableXlsx(rows, 'تحصيل صيانة');
+  return buildTableXlsx(rows, `تحصيل صيانة ${yr}`);
 }
 
 async function sendMaintenanceSheet(agent, env) {
@@ -515,6 +554,30 @@ export async function handleMaintenanceStaff(agent, t, env, canWrite = true) {
     }
   }
 
+  // --- تغيير كود السيستم (المدير بس) ---
+  const codeM = toLatin(t).match(/^(?:غيّ?ر\s+)?كود\s+(المدير|الاداره|الادارة|المشاهده|المشاهدة|الدخول)\s+(\S+)$/);
+  if (codeM) {
+    if (agent !== config.agent.manager) { await sendText(agent, '🔒 تغيير الكود للمدير بس.'); return true; }
+    const kn = arNorm(codeM[1]);
+    const which = /مدير/.test(kn) ? 'manager' : /مشاهد/.test(kn) ? 'view' : 'admin';
+    const val = toLatin(codeM[2]).replace(/\s/g, '');
+    const c = (await env.MEMORY.get('maint:codes', 'json')) || {};
+    c[which] = val;
+    await env.MEMORY.put('maint:codes', JSON.stringify(c));
+    const lbl = which === 'manager' ? 'المدير (الخاص بيك)' : which === 'view' ? 'المشاهدة' : 'الإدارة';
+    await sendText(agent, `✅ اتغيّر كود ${lbl} للسيستم لـ: ${val}`);
+    return true;
+  }
+  if (/^(الاكواد|اكواد السيستم|كود السيستم)$/.test(s)) {
+    if (agent !== config.agent.manager) { await sendText(agent, '🔒 الأكواد للمدير بس.'); return true; }
+    const c = (await env.MEMORY.get('maint:codes', 'json')) || {};
+    await sendText(
+      agent,
+      `🔑 أكواد سيستم الصيانة:\nالمدير (ليك إنت بس — بيشوف الرواتب): ${c.manager || '(الافتراضي 0000 — غيّره)'}\nالإدارة: ${c.admin || '(الافتراضي)'}\nالمشاهدة: ${c.view || '(الافتراضي)'}\n\nللتغيير: «كود المدير 1234» · «كود الادارة 5678» · «كود المشاهدة 9012»`,
+    );
+    return true;
+  }
+
   // --- بدء إضافة عملية ---
   if (/(صيانه|عمليه|عماره) جديد/.test(s) || /^(اضف|اضافه|ضيف)\s+(عمليه|عماره|صيانه)/.test(s)) {
     if (!canWrite) return denyWrite();
@@ -568,13 +631,14 @@ export async function handleMaintenanceStaff(agent, t, env, canWrite = true) {
   // --- مين ما دفعش [شهر N] ---
   if (/(ما ?دفع|مدفعش|لسه ما ?دفع|متاخر|المتاخر|عليهم فلوس|لسه عليه|فاضل فلوس|مدفعوش|ما دفعوش)/.test(s)) {
     const month = parseMonthFromText(t) || cairoNow().m;
-    await sendText(agent, unpaidReport(data, month));
+    const yr = Number((toLatin(t).match(/سن[هة]?\s*(20\d{2})/) || [])[1]) || cairoNow().y;
+    await sendText(agent, unpaidReport(data, month, yr));
     return true;
   }
 
   // --- تسجيل تحصيل: "30ج دفع 200 شهر 9" ---
   const payM = toLatin(t).match(
-    /^(.+?)\s+(?:دفع(?:ت|وا)?|سدد(?:ت)?|حصّ?لت(?:\s+منها)?|اتحصّ?ل(?:ت)?)\s+(\d+(?:[.,]\d+)?)(?:\s+(?:شهر|لشهر)\s*([^\s]+))?\s*$/,
+    /^(.+?)\s+(?:دفع(?:ت|وا)?|سدد(?:ت)?|حصّ?لت(?:\s+منها)?|اتحصّ?ل(?:ت)?)\s+(\d+(?:[.,]\d+)?)(?:\s+(?:شهر|لشهر)\s*([^\s]+))?(?:\s+سن[هة]?\s*20\d{2})?\s*$/,
   );
   if (payM) {
     if (!canWrite) return denyWrite();
@@ -583,11 +647,12 @@ export async function handleMaintenanceStaff(agent, t, env, canWrite = true) {
     const b = ops[0];
     const amount = Number(String(payM[2]).replace(',', '.'));
     const month = (payM[3] && parseMonthToken(payM[3])) || cairoNow().m;
-    b.months = b.months || {};
-    b.months[month] = amount;
-    addEvent(b, { type: 'payment', text: `اتحصّل ${fmtMoney(amount)} ج عن ${MONTHS_AR[month - 1]}`, amount, month, by: whoName(agent) });
+    const yr = Number((toLatin(t).match(/سن[هة]?\s*(20\d{2})/) || [])[1]) || cairoNow().y;
+    setMonthY(b, yr, month, amount);
+    if (String(b.year) === String(yr)) { b.months = b.months || {}; b.months[month] = amount; }
+    addEvent(b, { type: 'payment', text: `اتحصّل ${fmtMoney(amount)} ج عن ${MONTHS_AR[month - 1]} ${yr}`, amount, month, year: yr, by: whoName(agent) });
     await saveMaint(env, data);
-    await sendText(agent, `💵 سجّلت: ${opTitle(b)} دفع ${fmtMoney(amount)} ج عن ${MONTHS_AR[month - 1]} (شهر ${month}).`);
+    await sendText(agent, `💵 سجّلت: ${opTitle(b)} دفع ${fmtMoney(amount)} ج عن ${MONTHS_AR[month - 1]} ${yr}.`);
     return true;
   }
 
